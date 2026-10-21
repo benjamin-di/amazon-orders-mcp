@@ -180,3 +180,16 @@ def test_last_ok_survives_a_probe_error(tmp_path):
     Keeper(k.settings, broken, amazon.login, lambda: CREDS, clock=clock).check("amazon.com")
     entry = State(str(tmp_path / "keeper.json")).read()["sites"]["amazon.com"]
     assert entry["last_ok"] == ok_at and entry["last_result"] == "probe_error:ConnectionError"
+
+
+def test_unreadable_credentials_hold_without_using_a_sign_in(tmp_path):
+    amazon, clock = Amazon(), Clock()
+
+    def broken():
+        raise RuntimeError("op item get failed: couldn't start daemon")
+
+    k = Keeper(keeper(tmp_path, amazon, clock).settings, amazon.probe, amazon.login, broken, clock=clock)
+    assert k.check("amazon.de") == "credentials_failed_held"
+    entry = State(str(tmp_path / "keeper.json")).read()["sites"]["amazon.de"]
+    assert entry["logins"] == [] and entry["held"]["reason"].startswith("credentials: RuntimeError")
+    assert amazon.logins == []

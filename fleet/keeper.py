@@ -175,11 +175,21 @@ class Keeper:
         last_any = max((t for s in data["sites"].values() for t in s.get("logins", [])), default=0)
         if now - last_any < self.settings.login_spacing_seconds:
             return "signed_out_spacing"
+        try:
+            # Read first: a failure here (1Password, the item) never reached Amazon, so it costs no sign-in
+            credentials = self._credentials()
+        except Exception as e:
+            with self.state.edit() as data:
+                data["sites"].setdefault(site, {"logins": []})["held"] = {
+                    "since": now, "reason": f"credentials: {type(e).__name__}: {str(e)[:300]}"}
+            log.error(json.dumps({"site": site, "event": "credentials_failed_held", "error": type(e).__name__,
+                                  "detail": str(e)[:300]}))
+            return "credentials_failed_held"
         with self.state.edit() as data:
             data["sites"].setdefault(site, {"logins": []})["logins"].append(now)
         log.info(json.dumps({"site": site, "event": "signing_in", "reason": reason[:200]}))
         try:
-            self._login(site, self._credentials())
+            self._login(site, credentials)
             self._probe(site)
         except Exception as e:
             with self.state.edit() as data:

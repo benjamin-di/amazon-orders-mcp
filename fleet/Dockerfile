@@ -5,6 +5,8 @@
 #
 # Chromium is here for amazon-orders' [browser] extra, which clears Amazon's JavaScript challenges in a headless
 # browser. The 1Password CLI is here for the keeper only: the server is started without a service-account token.
+# uid 1000 is a real user (app, home /state): the 1Password CLI refuses its own directories when it can't name
+# the user that owns them.
 FROM ghcr.io/astral-sh/uv:0.9.26@sha256:9a23023be68b2ed09750ae636228e903a54a05ea56ed03a934d00fe9fbeded4b AS uv
 
 FROM python:3.12.13-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
@@ -55,6 +57,7 @@ COPY amazonorders_mcp /app/amazonorders_mcp
 COPY fleet /app/fleet
 RUN uv pip install --python /app/.venv/bin/python --no-deps --no-cache /app \
  && python -c "import amazonorders_mcp.server, fleet.keeper, fleet.server" \
+ && useradd --uid 1000 --user-group --home-dir /state --no-create-home --shell /usr/sbin/nologin app \
  && install -d -o 1000 -g 1000 -m 0700 /state
 
 ARG VCS_REF=unknown

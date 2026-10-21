@@ -96,6 +96,9 @@ jobs:
               python -c "import amazonorders_mcp.server, amazonorders_mcp.session, fleet.keeper, fleet.server"
               python -c "from amazonorders_mcp.session import site_cookie_jar_path"
               op --version >/dev/null
+              # 1Password's CLI refuses directories it can't attribute to a named user (1.4.0-fleet.1 failed so)
+              getent passwd 1000 | grep -q "^app:"
+              op account list >/dev/null
               curl --version >/dev/null
               python -m fleet.keeper status >/dev/null
               ls "$PLAYWRIGHT_BROWSERS_PATH" | grep -q chromium
