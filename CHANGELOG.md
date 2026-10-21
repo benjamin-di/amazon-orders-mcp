@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.4.1...HEAD)
 
+### Added
+
+- A `search_orders` tool, to find orders by product title, order number, address or recipient across every year, as the search box on Your Orders does.
+
 ## [1.4.1](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.4.0...1.4.1) - 2026-10-21
 
 ### Added

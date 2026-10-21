@@ -15,6 +15,7 @@ from amazonorders.entity.family_member import FamilyMember
 from amazonorders.entity.gift_card_activity import GiftCardActivity
 from amazonorders.entity.invoice_pdf import InvoicePdf
 from amazonorders.entity.order import Order
+from amazonorders.entity.order_search_result import OrderSearchResult
 from amazonorders.entity.prime_payment import PrimePayment
 from amazonorders.entity.tracking import Tracking
 from amazonorders.entity.transaction import Transaction
@@ -43,6 +44,7 @@ from amazonorders_mcp.schema import (
     InvoicePdfList,
     OrderDetails,
     OrderHistoryPage,
+    OrderSearchResultList,
     PrimePaymentList,
     TrackingDetails,
     TransactionsPage,
@@ -64,6 +66,8 @@ INSTRUCTIONS = (
     "activity, and Prime membership payments. The links from `get_invoice_pdfs` change on every call and may only "
     "open in a browser signed in to the user's Amazon account, so give them to the user right away rather than "
     "keeping them. "
+    "To find an order by what was bought, its order number, or who it went to, use `search_orders`, which searches "
+    "every year of a site at once, rather than paging through `get_order_history`. "
     "For the orders of an Amazon Household member, like a linked Teen account, get their `id` from "
     "`get_family_members` and pass it to `get_order_history` as `family_member_id`. "
     "Each Amazon site, like amazon.com or amazon.de, has its own orders and its own sign-in. Tools read the user's "
@@ -303,6 +307,20 @@ def create_server(saved_session: Optional[SavedSession] = None) -> MCPServer:
         order = await run(get, site)
 
         return OrderDetails.model_validate(order.to_dict(exclude_none=True))
+
+    @server.tool(annotations=READ_ONLY,
+                 description=tool_description("search_orders"))
+    async def search_orders(
+            query: Annotated[str, parameter_field("search_orders", "query")],
+            site: Annotated[Optional[str], SITE] = None
+    ) -> OrderSearchResultList:
+        def get(amazon_session: AmazonSession) -> List[OrderSearchResult]:
+            return AmazonOrders(amazon_session).search_orders(query)
+
+        results = await run(get, site)
+
+        return OrderSearchResultList.model_validate(
+            {"items": [result.to_dict(exclude_none=True) for result in results]})
 
     @server.tool(annotations=READ_ONLY,
                  description=tool_description("get_tracking"))
