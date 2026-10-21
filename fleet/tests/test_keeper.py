@@ -193,3 +193,8 @@ def test_unreadable_credentials_hold_without_using_a_sign_in(tmp_path):
     entry = State(str(tmp_path / "keeper.json")).read()["sites"]["amazon.de"]
     assert entry["logins"] == [] and entry["held"]["reason"].startswith("credentials: RuntimeError")
     assert amazon.logins == []
+
+
+def test_read_credentials_needs_the_vault_named():
+    with pytest.raises(RuntimeError, match="AMAZON_KEEPER_OP_VAULT"):
+        read_credentials("item", "", run=_op("{}"))

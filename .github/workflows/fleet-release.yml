@@ -1,10 +1,10 @@
 name: Fleet release
 
-# Builds fleet/Dockerfile (the server and the sign-in keeper) once and pushes it to GHCR, so nas-hk pulls an
+# Builds fleet/Dockerfile (the server and the sign-in keeper) once and pushes it to GHCR, so the host pulls an
 # immutable, rollback-able image. A release never re-runs tests: its first job requires CI's success for the
-# tagged commit (benjamin-di/ci/require-ci's logic, inlined below).
+# tagged commit (inlined below).
 #
-#   v1.4.0-fleet.1 tag -> :sha-<12> + :1.4.0-fleet.1   (pin with: release pin amazon-orders-mcp 1.4.0-fleet.1)
+#   v1.4.0-fleet.1 tag -> :sha-<12> + :1.4.0-fleet.1
 #   workflow_dispatch  -> :sha-<12> only
 on:
   push:
@@ -18,7 +18,6 @@ jobs:
       actions: read
       contents: read
     timeout-minutes: 25
-    # benjamin-di/ci/require-ci@v1, inlined: its repository is private and this fork is public.
     steps:
       - name: Require CI's success for the tagged commit
         env:
@@ -87,7 +86,7 @@ jobs:
           fi
           digest="$(docker manifest inspect --verbose "$candidate" | jq -er '.Descriptor.digest')"
           image="$REG/amazon-orders-mcp@$digest"
-          # Read-only root, uid 1000, a tmpfs home: as nas-hk runs it. The server must refuse without its token,
+          # Read-only root, uid 1000, a tmpfs home: as it runs in production. The server must refuse without its token,
           # and every runtime piece must be present.
           docker run --rm --network none --read-only --user 1000:1000 --tmpfs /state:uid=1000 --tmpfs /tmp \
             --entrypoint sh "$image" -c '

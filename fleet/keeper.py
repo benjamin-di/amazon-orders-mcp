@@ -73,7 +73,7 @@ class Settings:
             max_logins=int(env.get("AMAZON_KEEPER_MAX_LOGINS", "2")),
             login_spacing_seconds=int(env.get("AMAZON_KEEPER_LOGIN_SPACING_SECONDS", "60")),
             op_item=env.get("AMAZON_KEEPER_OP_ITEM", ""),
-            op_vault=env.get("AMAZON_KEEPER_OP_VAULT", "MCP-Browser Logins"),
+            op_vault=env.get("AMAZON_KEEPER_OP_VAULT", ""),
         )
 
 
@@ -225,8 +225,8 @@ class Keeper:
 
 def read_credentials(item: str, vault: str, run: Callable[..., Any] = subprocess.run) -> Credentials:
     """Read the Amazon login (username, password, one-time password secret) from a 1Password LOGIN item."""
-    if not item:
-        raise RuntimeError("AMAZON_KEEPER_OP_ITEM is not set")
+    if not item or not vault:
+        raise RuntimeError("AMAZON_KEEPER_OP_ITEM and AMAZON_KEEPER_OP_VAULT must be set")
     result = run(["op", "item", "get", item, "--vault", vault, "--format", "json", "--reveal"],
                  capture_output=True, text=True, timeout=60)
     if result.returncode != 0:

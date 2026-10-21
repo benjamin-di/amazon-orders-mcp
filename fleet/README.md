@@ -1,7 +1,7 @@
 # The fleet branch
 
-This fork of [alexdlaird/amazon-orders-mcp](https://github.com/alexdlaird/amazon-orders-mcp) exists to run the
-server on our nas-hk host until our pull requests are released upstream. Its default branch, `fleet`, is:
+This fork of [alexdlaird/amazon-orders-mcp](https://github.com/alexdlaird/amazon-orders-mcp) builds an image that
+runs the server on a home server until our pull requests are released upstream. Its default branch, `fleet`, is:
 
 - upstream's `develop`;
 - merged with our pull-request branches that upstream hasn't released yet (each also open upstream);
@@ -31,8 +31,7 @@ fix is released.
   - `python -m fleet.keeper status` prints the state; `check SITE` runs one check.
 - `server.py`: the server's entry point (`python -m fleet.server`): upstream's CLI and server, plus a
   `keeper_status` tool that reports the keeper's last check of every site from its state file (no Amazon request).
-  The gateway's route monitor calls it every 5 minutes; it fails when a site is held, signed out or not checked for
-  5 hours.
+  A monitor can call it as often as it likes; it fails when a site is held, signed out or not checked for 5 hours.
 - `Dockerfile`: one image for both.
   - The server (`python -m fleet.server`, JSON replies) is the default command; the keeper is
     `python -m fleet.keeper run`.
@@ -48,6 +47,5 @@ fix is released.
 1. `git fetch upstream && git merge upstream/develop`, then merge any updated pull-request branch.
 2. Recompile `requirements.lock` if `pyproject.toml` changed.
 3. Push to `fleet` (CI runs).
-4. Tag `v<upstream version>-fleet.<n>`, e.g. `v1.4.0-fleet.2`. `fleet-release.yml` builds and smoke-tests
+4. Tag `v<upstream version>-fleet.<n>`, e.g. `v1.4.0-fleet.3`. `fleet-release.yml` builds and smoke-tests
    `ghcr.io/benjamin-di/amazon-orders-mcp:<version>`.
-5. From devLinux: `release pin amazon-orders-mcp <version>` (without the `v`), then `deploy amazon-mcp`.

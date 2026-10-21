@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # The fleet image of amazon-orders-mcp (benjamin-di fork, branch fleet): the MCP server and the sign-in keeper
-# (fleet/keeper.py) from one image. nas-hk runs it twice: the server (CMD) and the keeper
+# (fleet/keeper.py) from one image, run twice: the server (CMD) and the keeper
 # (`python -m fleet.keeper run`). Built by .github/workflows/fleet-release.yml; see fleet/README.md.
 #
 # Chromium is here for amazon-orders' [browser] extra, which clears Amazon's JavaScript challenges in a headless

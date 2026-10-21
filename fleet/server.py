@@ -1,10 +1,10 @@
-"""The fleet's server entry point: upstream's amazon-orders-mcp, plus ``keeper_status`` for the route monitor.
+"""The fleet's server entry point: upstream's amazon-orders-mcp, plus ``keeper_status`` for monitoring.
 
 ``python -m fleet.server`` takes upstream's command-line arguments and runs the same server with one more tool,
 ``keeper_status``: what the sign-in keeper (fleet/keeper.py) last found for every site. It reads the keeper's state
-file only, so the route monitor's call every 5 minutes makes no Amazon request. It reports ``ok: false`` with a
+file only, so a monitor calling it every few minutes makes no Amazon request. It reports ``ok: false`` with a
 ``code`` (``held_<site>``, ``signed_out_<site>``, ``stale_<site>``, ``not_checked_<site>``) when any site isn't
-known to be signed in, which fails the gateway's canary.
+known to be signed in.
 """
 
 from __future__ import annotations
