@@ -21,28 +21,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # benjamin-di/ci's actions are private and this fork is public, so it runs without the same-tree gate
+    # (the fleet branch takes no pull requests).
     steps:
-      # A push whose exact tree already passed on a PR head skips the rest.
-      - id: gate
-        uses: benjamin-di/ci/gate@v1
-      - if: steps.gate.outputs.verified != 'true'
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - if: steps.gate.outputs.verified != 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           python-version: "3.12"
-      - if: steps.gate.outputs.verified != 'true'
-        name: Install the locked dependencies, then the package
+      - name: Install the locked dependencies, then the package
         run: |
           uv venv venv
           uv pip install --python venv/bin/python --no-deps -r fleet/requirements.lock
           uv pip install --python venv/bin/python --no-deps -e .
           uv pip install --python venv/bin/python pytest coverage flake8 flake8-pyproject pep8-naming mypy responses
-      - if: steps.gate.outputs.verified != 'true'
-        name: Lint (upstream's make check) and the keeper
+      - name: Lint (upstream's make check) and the keeper
         run: |
-          venv/bin/mypy amazonorders_mcp fleet/keeper.py
+          venv/bin/mypy amazonorders_mcp fleet/keeper.py fleet/server.py
           venv/bin/flake8
-      - if: steps.gate.outputs.verified != 'true'
-        name: Tests (upstream's and the keeper's)
+      - name: Tests (upstream's and the keeper's)
         run: venv/bin/python -m pytest -q tests fleet/tests

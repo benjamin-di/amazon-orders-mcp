@@ -2,7 +2,7 @@ name: Fleet release
 
 # Builds fleet/Dockerfile (the server and the sign-in keeper) once and pushes it to GHCR, so nas-hk pulls an
 # immutable, rollback-able image. A release never re-runs tests: its first job requires CI's success for the
-# tagged commit (benjamin-di/ci/require-ci).
+# tagged commit (benjamin-di/ci/require-ci's logic, inlined below).
 #
 #   v1.4.0-fleet.1 tag -> :sha-<12> + :1.4.0-fleet.1   (pin with: release pin amazon-orders-mcp 1.4.0-fleet.1)
 #   workflow_dispatch  -> :sha-<12> only
@@ -13,13 +13,32 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
     timeout-minutes: 25
+    # benjamin-di/ci/require-ci@v1, inlined: its repository is private and this fork is public.
     steps:
-      - uses: benjamin-di/ci/require-ci@v1
+      - name: Require CI's success for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1200))
+          while :; do
+            runs="$(gh run list -R "$REPO" --workflow ci.yml --commit "$SHA" --limit 20 \
+              --json status,conclusion,url --jq '.[] | "\(.status) \(.conclusion) \(.url)"')"
+            if grep -q '^completed success ' <<<"$runs"; then echo "ci.yml passed for ${SHA:0:12}"; exit 0; fi
+            if ! grep -qvE '^completed ' <<<"$runs"; then
+              echo "::error::ci.yml did not succeed for ${SHA:0:12} (push the commit to fleet first): $(head -1 <<<"$runs")"
+              exit 1
+            fi
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::ci.yml still running after 1200s"; exit 1; }
+            sleep 20
+          done
 
   build-and-push:
     needs: ci
