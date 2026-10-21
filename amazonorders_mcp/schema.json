@@ -592,6 +592,59 @@
         "additionalProperties": true
       }
     },
+    "search_orders": {
+      "description": "Search every year of the Order history for Orders by product title, Order number, address, or recipient, as the search box on Your Orders does, getting each matching Item with its Order's number and date.",
+      "parameters": {
+        "query": "What to search for: words from a product title, an Order number, or a name or address an Order was sent to."
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "The OrderSearchResults, one per matching Item, or an empty list if nothing matched.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An Item of an Order that matched an Order search. The Order search page lists each matching Item, with its Order's number and date, from every year of the Order history. The Order itself is fetched by `order_number` with `get_order`.",
+              "properties": {
+                "order_number": {
+                  "type": "string",
+                  "description": "The number of the Order the Item is in."
+                },
+                "order_details_link": {
+                  "type": "string",
+                  "description": "The Order details link. `None` when `order_number` is `None`."
+                },
+                "order_placed_date": {
+                  "type": "string",
+                  "format": "date",
+                  "description": "The date the Order was placed."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "The Item's title."
+                },
+                "link": {
+                  "type": "string",
+                  "description": "The Item's product link."
+                },
+                "asin": {
+                  "type": "string",
+                  "description": "The product ASIN, derived from `link`; `None` when the link is not a product page."
+                },
+                "quantity": {
+                  "type": "integer",
+                  "description": "The quantity of the Item ordered. Amazon shows it only when it's more than one, so it's `1` otherwise."
+                }
+              },
+              "additionalProperties": true
+            },
+            "description": "The OrderSearchResults, one per matching Item, or an empty list if nothing matched."
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "get_invoice_pdfs": {
       "description": "Get the invoice PDFs (invoices and credit notes) of a given Amazon Order ID from its invoice list.",
       "parameters": {

@@ -37,3 +37,20 @@ class TestAmazonOrders(UnitTestCase):
         self.assertTrue(result.structured_content["full_details"])
         self.assertTrue(result.structured_content["items"])
         self.assert_no_none_values(result.structured_content)
+
+    async def test_search_orders_parses_search_page(self):
+        # GIVEN
+        self.given_saved_session()
+        self.given_page_exists(self.test_config.constants.ORDER_SEARCH_URL, "orders/order-search.html")
+
+        # WHEN
+        result = await self.call_tool("search_orders", {"query": "example"})
+
+        # THEN
+        self.assertFalse(result.is_error, result.content)
+        items = result.structured_content["items"]
+        self.assertEqual(["111-0000000-0000001", "111-0000000-0000002", "112-0000000-0000003"],
+                         [item["order_number"] for item in items])
+        self.assertEqual("2019-06-15", items[2]["order_placed_date"])
+        self.assertEqual(2, items[2]["quantity"])
+        self.assert_no_none_values(items)
