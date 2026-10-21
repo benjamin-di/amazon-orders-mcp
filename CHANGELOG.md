@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.4.0...HEAD)
 
+### Added
+
+- Chromium in the Docker image, so `amazon-orders login` can clear Amazon's JavaScript challenges in a container, and a guide to running the server in one.
+
+### Changed
+
+- `sign_in` says how to sign in with `amazon-orders login` where there's no display to open a browser window on, like in a container.
+- The Docker image runs as a non-root user, with its config and saved session in `/home/app/.config/amazonorders`.
+
 ## [1.4.0](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.3.1...1.4.0) - 2026-10-21
 
 ### Added
