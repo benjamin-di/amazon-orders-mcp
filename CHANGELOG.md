@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.4.0...HEAD)
 
+### Added
+
+- `site` on every tool that reads Amazon, e.g. `amazon.de`, to read several Amazon sites from one server, each with its own saved session and cookie jar.
+- `check_session` checks every site with a saved session, and says which is the default.
+
+### Changed
+
+- `domain` is the default site: changing it with `update_config` is always saved, and moves the saved sessions with it.
+
 ## [1.4.0](https://github.com/alexdlaird/amazon-orders-mcp/compare/1.3.1...1.4.0) - 2026-10-21
 
 ### Added
