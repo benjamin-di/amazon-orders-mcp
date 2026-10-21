@@ -3,6 +3,7 @@ __license__ = "MIT"
 
 import io
 import os
+import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from amazonorders.conf import AmazonOrdersConfig
 from amazonorders.exception import AmazonOrdersAuthError, AmazonOrdersError
 
-from amazonorders_mcp.session import SavedSession, StderrIO, site_cookie_jar_path
+from amazonorders_mcp.session import SavedSession, StderrIO, has_display, site_cookie_jar_path
 from tests.unittestcase import UnitTestCase
 
 
@@ -217,3 +218,41 @@ class TestSession(UnitTestCase):
 
         # THEN
         self.assertEqual([True], default_thread_result)
+
+    @patch.object(sys, "platform", "linux")
+    def test_linux_without_display(self):
+        # GIVEN
+        with patch.dict(os.environ):
+            os.environ.pop("DISPLAY", None)
+            os.environ.pop("WAYLAND_DISPLAY", None)
+
+            # WHEN
+            display = has_display()
+
+        # THEN
+        self.assertFalse(display)
+
+    @patch.object(sys, "platform", "linux")
+    def test_linux_with_display(self):
+        # GIVEN
+        with patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-0"}):
+            os.environ.pop("DISPLAY", None)
+
+            # WHEN
+            display = has_display()
+
+        # THEN
+        self.assertTrue(display)
+
+    @patch.object(sys, "platform", "darwin")
+    def test_display_assumed_off_linux(self):
+        # GIVEN
+        with patch.dict(os.environ):
+            os.environ.pop("DISPLAY", None)
+            os.environ.pop("WAYLAND_DISPLAY", None)
+
+            # WHEN
+            display = has_display()
+
+        # THEN
+        self.assertTrue(display)
