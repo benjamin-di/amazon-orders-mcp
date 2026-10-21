@@ -69,7 +69,7 @@ LABEL org.opencontainers.image.source="https://github.com/benjamin-di/amazon-ord
 
 USER 1000:1000
 ENTRYPOINT ["dumb-init", "--"]
-# The server: upstream's CLI plus keeper_status (fleet/server.py). JSON replies, not event streams, through the
-# gateway; the bearer comes from AMAZON_ORDERS_MCP_TOKEN. The keeper runs `python -m fleet.keeper run`.
+# The server: upstream's CLI plus keeper_status (fleet/server.py). JSON replies, not event streams, behind a
+# reverse proxy; the bearer comes from AMAZON_ORDERS_MCP_TOKEN. The keeper runs `python -m fleet.keeper run`.
 CMD ["python", "-m", "fleet.server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000", \
      "--json-response"]

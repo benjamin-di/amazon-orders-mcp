@@ -38,8 +38,8 @@ fix is released.
   - It includes Chromium (for amazon-orders' `[browser]` extra) and the 1Password CLI (used by the keeper only).
   - It runs as uid 1000 with `HOME=/state`.
 - `requirements.lock`: the locked dependencies, compiled with
-  `uv pip compile pyproject.toml --python-version 3.12 --python-platform x86_64-unknown-linux-gnu`, with the
-  amazon-orders override noted in its header.
+  `uv pip compile pyproject.toml --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --override fleet/overrides.txt`
+  (`overrides.txt` pins amazon-orders to our fix until upstream releases it).
 - `tests/`: the keeper's tests. CI runs them with upstream's tests and lint.
 
 ## Updating

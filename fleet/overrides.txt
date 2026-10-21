@@ -1,0 +1,3 @@
+# amazon-orders with the Akamai interstitial fix (benjamin-di/amazon-orders, branch fix/akamai-interstitial),
+# until upstream releases it.
+amazon-orders[browser] @ https://github.com/benjamin-di/amazon-orders/archive/b0965a2e698e9bec338c67c11c9d5b0c77b709e4.tar.gz
