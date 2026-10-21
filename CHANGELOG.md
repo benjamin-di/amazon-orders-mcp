@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - `site` on every tool that reads Amazon, e.g. `amazon.de`, to read several Amazon sites from one server, each with its own saved session and cookie jar.
 - `check_session` checks every site with a saved session, and says which is the default.
+- `--transport streamable-http`, to serve remote MCP clients over HTTP, with `--host`, `--port`, `--json-response`, an optional bearer token, and a `/health` endpoint.
 
 ### Changed
 
