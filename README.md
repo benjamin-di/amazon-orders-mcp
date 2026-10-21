@@ -80,18 +80,41 @@ Just ask your assistant about your orders, and it will use the following tools:
 | `get_prime_payments`     | Prime membership fee charges, each with its order number                   |
 | `get_family_members`     | Amazon Household members whose orders you can view, like Teen accounts     |
 | `get_config`             | The settings your assistant can change, and their values                   |
-| `update_config`          | Changes a setting, like the Amazon site (e.g. `amazon.co.uk`)              |
-| `check_session`          | Whether you're signed in, and which Amazon site the server is set to read  |
+| `update_config`          | Changes a setting, like the default Amazon site (e.g. `amazon.co.uk`)      |
+| `check_session`          | Whether you're signed in, on each Amazon site you have a session for       |
 
 Order history and transactions come back in batches of `limit` results (25 by default, and a batch can run up to a
 page over), with a `cursor` your assistant passes back to get the next batch.
 
+Every tool that reads Amazon takes an optional `site`, like `amazon.de`, so your assistant can read each Amazon site
+you shop on from one server, e.g. "my last amazon.de orders". Without it, tools read your default site, the `domain`
+setting.
+
 ### Configuration
 
-Ask your assistant to change a setting, such as the Amazon site (e.g. `amazon.co.uk`) or the browser to sign in with.
-Settings are shared with the `amazon-orders` CLI, so it follows the same changes. See
+Ask your assistant to change a setting, such as the default Amazon site (e.g. `amazon.co.uk`) or the browser to sign in
+with. Settings are shared with the `amazon-orders` CLI, so it follows the same changes. See
 [Supported Sites](https://amazon-orders.readthedocs.io/language-packages.html#supported-sites) for the sites
 `amazon-orders` can read.
+
+### Several Amazon Sites
+
+Each Amazon site has its own orders and its own sign-in, so the server keeps a saved session for each site you sign in
+to. Ask your assistant to sign you in to a site, and it calls `sign_in` with that `site`. Each session is saved in its
+own cookie jar:
+
+- The default site's is `cookie_jar_path` (by default, `~/.config/amazonorders/cookies.json`), where the
+  `amazon-orders` CLI saves it, as before.
+- Every other site's is next to it, named for the site: `cookies.amazon.de.json`, `cookies.amazon.co.uk.json`, and so
+  on.
+
+To sign in to another site from a terminal, run `amazon-orders --domain amazon.de login --browser` with the
+`AMAZON_COOKIE_JAR_PATH` environment variable set to that site's cookie jar. A script that keeps sessions signed in can
+get the path from `amazonorders_mcp.session.site_cookie_jar_path(config, site)`.
+
+When your assistant changes the default site, the saved sessions move with it, so none is lost. If you change `domain`
+with the CLI's `update-config` instead, sign in to the new default site again. Every other setting applies to every
+site.
 
 ## Documentation
 
