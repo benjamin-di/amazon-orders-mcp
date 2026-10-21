@@ -12,12 +12,13 @@ from PyPI and only `fleet/` remains.
 
 | Branch | Upstream pull request | What |
 |---|---|---|
-| `feat/several-sites` | (link once opened) | One server for several Amazon sites, one saved session per site |
-| `feat/http-transport` | (link once opened) | Streamable HTTP with an optional bearer token and `/health` |
-| `feat/container` | (link once opened) | Chromium in the image; sign-in without a display |
+| `feat/several-sites` | [#3](https://github.com/alexdlaird/amazon-orders-mcp/pull/3) (issue [#1](https://github.com/alexdlaird/amazon-orders-mcp/issues/1)) | One server for several Amazon sites, one saved session per site |
+| `feat/http-transport` | [#2](https://github.com/alexdlaird/amazon-orders-mcp/pull/2) | Streamable HTTP with an optional bearer token and `/health` |
+| `feat/container` | [#4](https://github.com/alexdlaird/amazon-orders-mcp/pull/4) | Chromium in the image; sign-in without a display |
 
-amazon-orders comes from our fork's `fix/akamai-interstitial` commit (pinned in `requirements.lock`) until that
-fix is released.
+amazon-orders comes from our fork's `fix/akamai-interstitial` commit
+([alexdlaird/amazon-orders#160](https://github.com/alexdlaird/amazon-orders/pull/160), pinned in `overrides.txt`)
+until that fix is released.
 
 ## What's here
 
