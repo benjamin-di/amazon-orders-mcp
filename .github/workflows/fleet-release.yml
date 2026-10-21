@@ -1,0 +1,106 @@
+name: Fleet release
+
+# Builds fleet/Dockerfile (the server and the sign-in keeper) once and pushes it to GHCR, so nas-hk pulls an
+# immutable, rollback-able image. A release never re-runs tests: its first job requires CI's success for the
+# tagged commit (benjamin-di/ci/require-ci).
+#
+#   v1.4.0-fleet.1 tag -> :sha-<12> + :1.4.0-fleet.1   (pin with: release pin amazon-orders-mcp 1.4.0-fleet.1)
+#   workflow_dispatch  -> :sha-<12> only
+on:
+  push:
+    tags: ['v*-fleet.*']
+  workflow_dispatch: {}
+
+jobs:
+  ci:
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: benjamin-di/ci/require-ci@v1
+
+  build-and-push:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ZSTD_PUSH: type=registry,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+      REG: ghcr.io/${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build, push and smoke-test the candidate
+        id: candidate
+        env:
+          DOCKER_BUILDKIT: "1"
+          VCS_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(git show -s --format=%cI "$VCS_REF")"
+          candidate="$REG/amazon-orders-mcp:sha-$(git rev-parse --short=12 HEAD)"
+          lookup_error="$(mktemp)"
+          trap 'rm -f "$lookup_error"' EXIT
+          if docker manifest inspect "$candidate" >/dev/null 2>"$lookup_error"; then
+            docker pull "$candidate"
+            revision="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$candidate")"
+            [ "$revision" = "$VCS_REF" ] || { echo "ERROR: $candidate records unexpected revision $revision" >&2; exit 1; }
+          else
+            grep -Eqi 'manifest unknown|not found' "$lookup_error" || { cat "$lookup_error" >&2; exit 1; }
+            docker buildx build --provenance=false --output "$ZSTD_PUSH" -f fleet/Dockerfile \
+              --build-arg VCS_REF="$VCS_REF" --build-arg BUILD_DATE="$BUILD_DATE" \
+              --cache-from "type=registry,ref=$REG/amazon-orders-mcp:buildcache" \
+              --cache-to "type=registry,ref=$REG/amazon-orders-mcp:buildcache,mode=max" \
+              -t "$candidate" .
+          fi
+          digest="$(docker manifest inspect --verbose "$candidate" | jq -er '.Descriptor.digest')"
+          image="$REG/amazon-orders-mcp@$digest"
+          # Read-only root, uid 1000, a tmpfs home: as nas-hk runs it. The server must refuse without its token,
+          # and every runtime piece must be present.
+          docker run --rm --network none --read-only --user 1000:1000 --tmpfs /state:uid=1000 --tmpfs /tmp \
+            --entrypoint sh "$image" -c '
+              set -e
+              [ "$(id -u)" = 1000 ]
+              python -c "import amazonorders_mcp.server, amazonorders_mcp.session, fleet.keeper, fleet.server"
+              python -c "from amazonorders_mcp.session import site_cookie_jar_path"
+              op --version >/dev/null
+              curl --version >/dev/null
+              python -m fleet.keeper status >/dev/null
+              ls "$PLAYWRIGHT_BROWSERS_PATH" | grep -q chromium
+              chromium --version
+              python -m fleet.server --help >/dev/null
+            '
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Promote to the release tag
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fleet\.[0-9]+$ ]] || { echo "bad tag $GITHUB_REF_NAME" >&2; exit 2; }
+          release="$REG/amazon-orders-mcp:$version"
+          manifest_digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -er '.digest'; }
+          error_file="$(mktemp)"
+          if current="$(manifest_digest "$release" 2>"$error_file")"; then
+            [ "$current" = "$DIGEST" ] || { echo "immutable ref conflict: $release" >&2; exit 1; }
+          else
+            grep -Eqi 'manifest unknown|not found' "$error_file" || { cat "$error_file" >&2; exit 1; }
+            docker buildx imagetools create --prefer-index=false --tag "$release" "$REG/amazon-orders-mcp@$DIGEST"
+          fi
+          [ "$(manifest_digest "$release")" = "$DIGEST" ]
+          echo "verified $release@$DIGEST"
