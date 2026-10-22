@@ -86,10 +86,9 @@ jobs:
           fi
           digest="$(docker manifest inspect --verbose "$candidate" | jq -er '.Descriptor.digest')"
           image="$REG/amazon-orders-mcp@$digest"
-          # Read-only root, uid 1000, a tmpfs home: as it runs in production. The server must refuse without its token,
-          # and every runtime piece must be present.
-          docker run --rm --network none --read-only --user 1000:1000 --tmpfs /state:uid=1000 --tmpfs /tmp \
-            --entrypoint sh "$image" -c '
+          # Read-only root, uid 1000, a tmpfs home: as it runs in production. Every runtime piece must be present.
+          run=(--network none --read-only --user 1000:1000 --tmpfs /state:uid=1000 --tmpfs /tmp)
+          docker run --rm "${run[@]}" --entrypoint sh "$image" -c '
               set -e
               [ "$(id -u)" = 1000 ]
               python -c "import amazonorders_mcp.server, amazonorders_mcp.session, fleet.keeper, fleet.server"
@@ -101,12 +100,27 @@ jobs:
               # 1Password's CLI refuses directories it can't attribute to a named user (1.4.0-fleet.1 failed so)
               getent passwd 1000 | grep -q "^app:"
               op account list >/dev/null
+              # As the stack runs the keeper: the CLI's config on the keeper's own tmpfs, no cache daemon
+              OP_CONFIG_DIR=/tmp/op OP_CACHE=false op account list >/dev/null
               curl --version >/dev/null
               python -m fleet.keeper status >/dev/null
               ls "$PLAYWRIGHT_BROWSERS_PATH" | grep -q chromium
               chromium --version
               python -m fleet.server --help >/dev/null
             '
+          # The server (the image's CMD, bound to 0.0.0.0) refuses to start without its token.
+          rc=0; timeout 60 docker run --rm "${run[@]}" "$image" || rc=$?
+          [ "$rc" = 2 ] || { echo "ERROR: expected a refusal without AMAZON_ORDERS_MCP_TOKEN, got exit $rc" >&2; exit 1; }
+          # With it, /health answers and /mcp refuses a request without the bearer.
+          name="smoke-${VCS_REF:0:12}"
+          docker run -d --name "$name" "${run[@]}" -e AMAZON_ORDERS_MCP_TOKEN=smoke-token "$image" >/dev/null
+          trap 'docker logs "$name" 2>&1 | tail -40; docker rm -f "$name" >/dev/null 2>&1 || true; rm -f "$lookup_error"' EXIT
+          for _ in $(seq 30); do docker exec "$name" curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1 && break; sleep 1; done
+          docker exec "$name" curl -fsS http://127.0.0.1:8000/health
+          anon="$(docker exec "$name" curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/mcp \
+            -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')"
+          [ "$anon" = 401 ] || { echo "ERROR: tools/list without the bearer got $anon" >&2; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Promote to the release tag
