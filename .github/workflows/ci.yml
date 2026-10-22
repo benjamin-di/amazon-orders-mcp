@@ -34,7 +34,7 @@ jobs:
           uv pip install --python venv/bin/python pytest coverage flake8 flake8-pyproject pep8-naming mypy responses
       - name: Lint (upstream's make check) and the keeper
         run: |
-          venv/bin/mypy amazonorders_mcp fleet/keeper.py fleet/server.py
+          venv/bin/mypy amazonorders_mcp fleet/keeper.py fleet/server.py fleet/upstream.py
           venv/bin/flake8
       - name: Tests (upstream's and the keeper's)
         run: venv/bin/python -m pytest -q tests fleet/tests

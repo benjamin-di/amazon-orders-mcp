@@ -10,17 +10,15 @@ runs the server on a home server until our pull requests are released upstream. 
 Nothing else differs from upstream. When every pull request is released, the image installs upstream's release
 from PyPI and only `fleet/` remains.
 
-| Branch | Upstream pull request | What |
-|---|---|---|
-| `fix/sign-in-site-first` | [#5](https://github.com/alexdlaird/amazon-orders-mcp/pull/5) | `sign_in` checks the site before the display |
-| `feat/search-orders` | not yet opened (needs amazon-orders#169 released) | A `search_orders` tool |
+`carried.txt` lists what the build carries on top of upstream: each item's upstream pull request and our branch.
+`python fleet/upstream.py` (needs the `gh` CLI) reports for each whether upstream has merged and released it, and
+exits 1 when something can be dropped. Today that's Order search in amazon-orders
+([#169](https://github.com/alexdlaird/amazon-orders/pull/169)), and the `search_orders` tool built on it, whose pull
+request follows #169's release.
 
-Several sites (#3), the container (#4) and the Streamable HTTP transport (#2) are in upstream's `develop`.
-
-amazon-orders comes from our fork's `fleet-core` branch, pinned in `overrides.txt`, until upstream releases:
-[alexdlaird/amazon-orders#168](https://github.com/alexdlaird/amazon-orders/pull/168) (VAT and addresses on English EU
-pages) and [#169](https://github.com/alexdlaird/amazon-orders/pull/169) (Order search). `fleet-core` is upstream's
-`develop` with both merged in.
+amazon-orders comes from our fork's `fleet-core` branch: upstream's `develop` with the carried amazon-orders pull
+requests merged in. `overrides.txt` pins one commit of it, which a `fleet-core-<date>` tag keeps, so the pin can be
+fetched even after `fleet-core` is rebuilt. Never delete a tag a pin uses.
 
 ## What's here
 
@@ -47,11 +45,19 @@ pages) and [#169](https://github.com/alexdlaird/amazon-orders/pull/169) (Order s
 
 ## Updating
 
-1. `git fetch upstream && git merge upstream/develop`, then merge any updated pull-request branch. If a pull-request
-   branch was rewritten (rebased upstream), rebuild instead: a new branch from `upstream/develop`, the open
-   pull-request branches merged in, then `fleet/` and the two workflows; then merge `fleet` into it with
-   `-s ours`, so `fleet` moves forward without a force-push.
-2. Recompile `requirements.lock` if `pyproject.toml` changed.
-3. Push to `fleet` (CI runs).
-4. Tag `v<upstream version>-fleet.<n>`, e.g. `v1.4.0-fleet.3`. `fleet-release.yml` builds and smoke-tests
-   `ghcr.io/benjamin-di/amazon-orders-mcp:<version>`.
+Fetch first (`git fetch origin upstream`) and build on `origin/fleet`: other changes land on `fleet` too.
+
+1. **Upstream moved:** `git merge upstream/develop` into `fleet`.
+2. **A carried branch changed:** merge it into `fleet`. If it was rewritten (rebased for upstream), rebuild instead:
+   1. a new branch from `upstream/develop`;
+   2. merge each open branch in `carried.txt`;
+   3. bring `fleet/` and the two workflows from `origin/fleet`;
+   4. `git merge -s ours origin/fleet`, so `fleet` moves forward without a force-push.
+3. **The amazon-orders pin changed:** rebuild `fleet-core` (upstream's `develop` plus the carried amazon-orders
+   branches), push it, tag the commit `fleet-core-<date>`, point `overrides.txt` at it, and recompile
+   `requirements.lock` with the command above. Recompile too if `pyproject.toml` changed.
+4. **Something was released upstream** (`python fleet/upstream.py` exits 1): remove it from `carried.txt` and the
+   build. When no amazon-orders item is left, delete `overrides.txt` and drop `--override` from the compile command.
+5. Push to `fleet` (CI runs). A change to what the image runs is released by tagging `v<upstream version>-fleet.<n>`,
+   e.g. `v1.4.2-fleet.1`. `fleet-release.yml` builds and smoke-tests `ghcr.io/benjamin-di/amazon-orders-mcp:<version>`.
+   A change to this directory's documentation or tooling alone needs no release.
