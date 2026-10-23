@@ -1,3 +1,0 @@
-# amazon-orders from our fork's fleet-core branch (upstream develop + amazon-orders#168 and #169), until upstream
-# releases them.
-amazon-orders[browser] @ https://github.com/benjamin-di/amazon-orders/archive/07ae18c72139e6dbe76e015264b5453bb767607e.tar.gz

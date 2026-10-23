@@ -1,5 +1,0 @@
-# What the fleet build carries on top of upstream, one line each: repo, upstream pull request (- if none yet),
-# our branch, what. `python fleet/upstream.py` says, for each, whether upstream has merged and released it, so
-# the fleet can drop it. amazon-orders lines are built into the fleet-core branch and pinned in overrides.txt.
-amazon-orders 169 feat/order-search Order search
-amazon-orders-mcp - feat/search-orders The search_orders tool (pull request after amazon-orders#169 is released)
