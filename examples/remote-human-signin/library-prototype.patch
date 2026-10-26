@@ -1,0 +1,1141 @@
+diff --git a/examples/amazon/README.md b/examples/amazon/README.md
+new file mode 100644
+index 0000000..3a60e7c
+--- /dev/null
++++ b/examples/amazon/README.md
+@@ -0,0 +1,83 @@
++# Amazon remote human sign-in prototype
++
++This example composes upstream `amazon-orders-mcp` tools with an expiring human
++sign-in link. It uses `PlaywrightBrowserLogin` for browser selection and login,
++`AmazonSession.import_cookies` for independent verification and atomic publication,
++and `SavedSession.sign_in_with` for the site's tool lock. signin-window supplies
++the display/viewer and lifetime. The application retains its session; no cookie
++payload crosses an HTTP result endpoint.
++
++The default provider is entirely synthetic and listens on loopback. The browser
++route allowlist refuses external origins in synthetic mode. No account, password,
++OTP or real provider page is used. The only action is a local form button.
++
++## Source requirements
++
++This prototype needs three proposed upstream extension points, not yet released:
++
++1. `PlaywrightBrowserLogin.launch_env()` and launcher environment forwarding.
++2. `AmazonSession.import_cookies()` with isolated verification before saving.
++3. `SavedSession.sign_in_with(callback, site)` for application-owned sign-in.
++
++Install the prepared source trees together in a separate environment, from a
++directory containing `amazon-orders/`, `amazon-orders-mcp/` and `signin-window/`:
++
++```sh
++uv venv prototype-venv
++uv pip install --python prototype-venv/bin/python ./amazon-orders ./amazon-orders-mcp ./signin-window \
++  playwright uvicorn pytest httpx
++prototype-venv/bin/python -m playwright install chromium
++```
++
++The accompanying review bundle contains replayable upstream patches, base commit
++IDs, issue packets and a verification script. The example
++never imports private upstream internals. The upstream packages acquire no
++signin-window dependency, and local sign-in/tool schemas remain unchanged.
++
++## Run locally
++
++Use Linux with Xvfb, x11vnc, and the pinned noVNC 1.6.0 assets described in the
++library's minimal Dockerfile. Create a private random token file, then run:
++
++```sh
++prototype-venv/bin/python signin-window/examples/amazon/app.py \
++  --state /tmp/amazon-prototype-state --token-file /path/to/private-token \
++  --novnc-dir /opt/novnc
++```
++
++Connect an MCP client to `http://127.0.0.1:8765/mcp` using that bearer, call
++`amazon_connect`, open the returned link and click the synthetic sign-in button.
++After completion, `check_session` uses the published session. MCP calls require
++the bearer; the viewer requires its own expiring link.
++
++`--amazon` selects the actual provider and requires the managed Chromium policy.
++Use that option only on an authorized deployed host. Actual Amazon login has not
++been qualified by this prototype. Stored/configured credentials and `AMAZON_`
++environment overrides are refused. The application binds loopback by default.
++
++## Acceptance
++
++With the three patched packages installed and browser/display dependencies ready:
++
++```sh
++SIGNIN_XVFB=Xvfb SIGNIN_X11VNC=x11vnc NOVNC_DIR=/opt/novnc \
++  prototype-venv/bin/python -m pytest signin-window/examples/amazon/test_acceptance.py -v
++```
++
++These tests drive real Chromium through noVNC, including remote keyboard input,
++and use the real upstream tools over MCP. They cover reload without another
++login, failure preserving the previous jar, saving after page closure, explicit
++cancel/cleanup, and refusing publication by a superseded attempt. Library tests
++also cover expiry without any requests and shutdown while saving. Upstream
++tests cover failed publication, changed jars and foreign-cookie rejection.
++
++## Limits
++
++This is one application process with one publisher per session root. The normal
++Amazon cookie-file lock coordinates threads, not arbitrary CLI/other-process
++writers. The import's revision check detects replacement during verification but
++is not a cross-process compare-and-swap. Adding a shared writer lease requires
++agreement across every writer. Session continuity across a process restart,
++mobile/password-manager acceptance and remote acknowledged handover are not
++claimed here. The existing tool's `sign_in` remains a local-browser operation;
++the added instructions direct remote users to `amazon_connect`.
+diff --git a/examples/amazon/adapter.py b/examples/amazon/adapter.py
+new file mode 100644
+index 0000000..f8d3bf5
+--- /dev/null
++++ b/examples/amazon/adapter.py
+@@ -0,0 +1,118 @@
++"""Optional Amazon adapter. Requires the three prepared upstream extension points.
++
++The application owns browser login, verification and publication. signin-window
++owns only the interactive display and the link. No credentials are configured.
++"""
++
++from __future__ import annotations
++
++import copy
++import json
++import os
++import threading
++import time
++from pathlib import Path
++from urllib.parse import urlsplit
++
++from amazonorders.contrib.browser.playwright import PlaywrightBrowserLogin
++from amazonorders.exception import AmazonOrdersError
++from amazonorders_mcp.session import SavedSession
++
++from signin_window.browser import LAUNCH_ARGS, harden_sync
++from signin_window.hosts import top_level
++from signin_window.service import Window
++
++
++class HumanLogin(PlaywrightBrowserLogin):
++    def __init__(self, session, window: Window, synthetic: bool):
++        super().__init__(session)
++        self.window, self.synthetic = window, synthetic
++
++    def launch_env(self):
++        # Child-only settings: never mutate this process's DISPLAY or leak service credentials.
++        allowed = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TZ", "XKB_CONFIG_ROOT", "XDG_RUNTIME_DIR")
++        return self.window.env({key: os.environ[key] for key in allowed if key in os.environ})
++
++    def launch_args(self):
++        return [*LAUNCH_ARGS, "--window-position=0,0", "--no-first-run"]
++
++    def new_context(self, browser):
++        context = super().new_context(browser)
++        harden_sync(context, browser)
++        own = urlsplit(self.config.constants.BASE_URL).hostname
++        resources = (
++            "media-amazon.com",
++            "ssl-images-amazon.com",
++            "images-amazon.com",
++            "awswaf.com",
++            "cloudfront.net",
++            "a2z.com",
++        )
++
++        def route(request_route):
++            request = request_route.request
++            parsed = urlsplit(request.url)
++            hosts = (own,) if self.synthetic else (own, "amazon.com", *(resources if not top_level(request) else ()))
++            if parsed.scheme in (("http",) if self.synthetic else ("https",)) and any(
++                parsed.hostname == host or (parsed.hostname or "").endswith("." + host) for host in hosts
++            ):
++                request_route.continue_()
++            else:
++                request_route.abort()
++
++        context.route("**/*", route)
++        return context
++
++    def on_sign_in_page(self, context, page):
++        self.window.waiting(urlsplit(page.url).hostname or "")
++
++    def wait_for_sign_in(self, context, page, timeout):
++        deadline = time.monotonic() + timeout
++        while time.monotonic() < deadline and not self.window.cancelled.is_set():
++            if self.is_signed_in(context.cookies()):
++                self.window.saving()  # close control before verification and publication
++                return
++            page.wait_for_timeout(100)
++        raise AmazonOrdersError("The interactive sign-in ended before completion.")
++
++
++class AmazonConnect:
++    def __init__(self, sessions: SavedSession, *, synthetic: bool = False):
++        self.sessions, self.synthetic = sessions, synthetic
++        self.guard = threading.Lock()
++        self.generations: dict[str, int] = {}
++        self.relay = None
++
++    def create(self, site=None):
++        site = self.sessions.site(site)
++        with self.guard:
++            generation = self.generations.get(site, 0) + 1
++            link = self.relay.create(site, params={"site": site, "key": site, "generation": generation})
++            self.generations[site] = generation
++        return {"url": link.url, "expires_at": link.expires_at}
++
++    def run(self, window: Window):
++        site = window.params["site"]
++
++        def login(current):
++            stage = copy.deepcopy(current.config)
++            stage.cookie_jar_path = str(Path(window.temp_profile("amazon-stage-")) / "cookies.json")
++            if stage.cookie_jar_path == current.config.cookie_jar_path:
++                raise AmazonOrdersError("An environment override prevents staging.")
++            stage.update_config("request_timeout", 10, save=False)
++            # Public Amazon APIs, including its own browser selection and verification.
++            from amazonorders.session import AmazonSession
++
++            candidate = AmazonSession(config=stage, io=current.io)
++            try:
++                HumanLogin(candidate, window, self.synthetic).login(max(1, int(window.deadline - time.monotonic())))
++                cookies = json.loads(Path(stage.cookie_jar_path).read_text())
++                with self.guard:
++                    if window.cancelled.is_set() or self.generations.get(site) != window.params["generation"]:
++                        raise AmazonOrdersError("This sign-in was superseded.")
++                    current.import_cookies(cookies)
++                    window.finish("connected")
++            finally:
++                candidate.session.close()
++
++        self.sessions.sign_in_with(login, site)
+diff --git a/examples/amazon/app.py b/examples/amazon/app.py
+new file mode 100644
+index 0000000..053686e
+--- /dev/null
++++ b/examples/amazon/app.py
+@@ -0,0 +1,99 @@
++"""An optional remote-human-login host composed with unmodified upstream tools."""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import os
++from pathlib import Path
++
++import anyio
++import uvicorn
++from adapter import AmazonConnect
++from amazonorders.conf import AmazonOrdersConfig
++from amazonorders_mcp.server import BearerTokenMiddleware, create_server
++from amazonorders_mcp.session import SavedSession
++from starlette.applications import Starlette
++from starlette.routing import Mount
++from synthetic import Provider
++
++from signin_window.browser import policy_installed
++from signin_window.client import LocalBackend
++from signin_window.page import PageText
++from signin_window.relay import Relay
++from signin_window.service import Windows
++
++
++def make_app(config, *, public_url, token, novnc_dir, synthetic=False, windows_factory=Windows):
++    if len(token) < 32:
++        raise ValueError("a token of at least 32 characters is required")
++    if not synthetic and not policy_installed():
++        raise ValueError("the browser's managed policy is required for actual sign-in")
++    if any(name.startswith("AMAZON_") for name in os.environ):
++        raise ValueError("configure this prototype through its config, without AMAZON_ environment overrides")
++    if any(getattr(config, name, None) for name in ("username", "password", "otp_secret_key")):
++        raise ValueError("human sign-in requires a config without stored credentials")
++    sessions = SavedSession(config)
++    connect = AmazonConnect(sessions, synthetic=synthetic)
++    server = create_server(
++        sessions,
++        additional_instructions="For remote human sign-in use amazon_connect; give its "
++        "link to the account holder, then use check_session after they finish.",
++    )
++
++    @server.tool()
++    async def amazon_connect(site: str | None = None) -> dict:
++        """Return an expiring link for the account holder to sign in themselves."""
++        return await anyio.to_thread.run_sync(connect.create, site)
++
++    mcp_app = server.streamable_http_app(stateless_http=True, json_response=True, host="127.0.0.1")
++    windows = windows_factory(connect.run, save_seconds=45)
++
++    @contextlib.asynccontextmanager
++    async def lifespan(app):
++        connect.relay = Relay(
++            LocalBackend(windows, novnc_dir),
++            public_url.rstrip("/") + "/connect",
++            text=PageText(service="Amazon", reconnect=True),
++        )
++        app.router.routes[:] = [*connect.relay.routes("/connect"), Mount("/", BearerTokenMiddleware(mcp_app, token))]
++        app.state.connect = connect
++        app.state.windows = windows
++        app.state.sessions = sessions
++        app.state.mcp = server
++        async with mcp_app.router.lifespan_context(mcp_app), windows.lifespan(), connect.relay.lifespan():
++            yield
++
++    return Starlette(lifespan=lifespan)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--state", type=Path, required=True)
++    parser.add_argument("--token-file", type=Path, required=True)
++    parser.add_argument("--novnc-dir", type=Path, required=True)
++    parser.add_argument("--public-url", default="http://127.0.0.1:8765")
++    parser.add_argument("--port", type=int, default=8765)
++    parser.add_argument("--host", default="127.0.0.1")
++    parser.add_argument("--amazon", action="store_true", help="Use actual Amazon; only on an authorized deployed host")
++    args = parser.parse_args()
++    args.state.mkdir(parents=True, exist_ok=True)
++    config = AmazonOrdersConfig(
++        config_path=str(args.state / "config.yml"),
++        data={"cookie_jar_path": str(args.state / "cookies.json"), "request_timeout": 10},
++    )
++    with contextlib.ExitStack() as stack:
++        if not args.amazon:
++            stack.enter_context(Provider()).configure(config)
++        app = make_app(
++            config,
++            public_url=args.public_url,
++            token=args.token_file.read_text().strip(),
++            novnc_dir=args.novnc_dir,
++            synthetic=not args.amazon,
++        )
++        uvicorn.run(app, host=args.host, port=args.port, access_log=False)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/examples/amazon/synthetic.py b/examples/amazon/synthetic.py
+new file mode 100644
+index 0000000..359bb69
+--- /dev/null
++++ b/examples/amazon/synthetic.py
+@@ -0,0 +1,77 @@
++"""Local stand-in for Amazon. Contains no accounts, credentials or external requests."""
++
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from threading import Thread
++
++from amazonorders.constants import Constants
++
++
++class SyntheticConstants(Constants):
++    def __init__(self, config):
++        super().__init__(config)
++        self.BASE_URL = config.synthetic_origin
++        self.SIGN_IN_URL = self.BASE_URL + "/signin"
++        self.SIGN_IN_QUERY_PARAMS = {}
++        self.ORDER_HISTORY_URL = self.BASE_URL + "/orders"
++        self.COOKIES_SET_WHEN_AUTHENTICATED = ["sid"]
++        self.REQUEST_COOKIES = {}
++        self.BASE_HEADERS = {}
++
++
++class Provider:
++    def __init__(self):
++        self.reject = False
++        self.requests = []
++        owner = self
++
++        class Handler(BaseHTTPRequestHandler):
++            def log_message(self, *args):
++                pass
++
++            def do_GET(self):
++                owner.requests.append(self.path.split("?")[0])
++                if self.path.startswith("/signin"):
++                    body = (
++                        b'<html><form method="post" action="/complete">'
++                        b"<button autofocus>Complete synthetic sign-in</button></form></html>"
++                    )
++                    self.send_response(200)
++                elif owner.reject:
++                    body = b"Verification unavailable"
++                    self.send_response(503)
++                elif "sid=synthetic-accepted" not in self.headers.get("Cookie", ""):
++                    self.send_response(302)
++                    self.send_header("Location", "/signin")
++                    self.end_headers()
++                    return
++                else:
++                    self.send_response(200)
++                    body = b"<html><h1>Synthetic orders</h1></html>"
++                self.send_header("Content-Type", "text/html; charset=utf-8")
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def do_POST(self):
++                self.send_response(303)
++                self.send_header("Set-Cookie", "sid=synthetic-accepted; Path=/; HttpOnly; SameSite=Lax")
++                self.send_header("Location", "/orders")
++                self.end_headers()
++
++        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++        self.thread = Thread(target=self.server.serve_forever, daemon=True)
++        self.origin = f"http://127.0.0.1:{self.server.server_port}"
++
++    def __enter__(self):
++        self.thread.start()
++        return self
++
++    def __exit__(self, *args):
++        self.server.shutdown()
++        self.server.server_close()
++        self.thread.join()
++
++    def configure(self, config):
++        # Public class configuration survives deepcopy and other site's config creation.
++        config.update_config("synthetic_origin", self.origin, save=False)
++        config.update_config("constants_class", "synthetic.SyntheticConstants", save=False)
+diff --git a/examples/amazon/test_acceptance.py b/examples/amazon/test_acceptance.py
+new file mode 100644
+index 0000000..9049279
+--- /dev/null
++++ b/examples/amazon/test_acceptance.py
+@@ -0,0 +1,190 @@
++"""Real Chromium/noVNC acceptance against a local provider; no Amazon traffic."""
++
++import json
++import logging
++import os
++import socket
++import threading
++import time
++
++import httpx
++import pytest
++import uvicorn
++from amazonorders.conf import AmazonOrdersConfig
++from app import make_app
++from playwright.sync_api import sync_playwright
++from synthetic import Provider
++
++from signin_window.service import Windows
++
++TOKEN = "synthetic-prototype-token-0000000000000000"
++
++
++def wait_for(predicate, seconds=15):
++    deadline = time.monotonic() + seconds
++    while not predicate():
++        assert time.monotonic() < deadline, "acceptance deadline exceeded"
++        time.sleep(0.05)
++
++
++@pytest.fixture
++def host(tmp_path):
++    with Provider() as provider:
++        sock = socket.socket()
++        sock.bind(("127.0.0.1", 0))
++        origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
++        jar = tmp_path / "cookies.json"
++        config = AmazonOrdersConfig(data={"cookie_jar_path": str(jar), "request_timeout": 2})
++        provider.configure(config)
++
++        def windows_factory(runner, **kwargs):
++            def observed(window):
++                try:
++                    return runner(window)
++                except Exception:
++                    logging.getLogger("synthetic_acceptance").exception("Synthetic runner failed")
++                    raise
++
++            return Windows(observed, xvfb=os.environ["SIGNIN_XVFB"], x11vnc=os.environ["SIGNIN_X11VNC"], **kwargs)
++
++        app = make_app(
++            config,
++            public_url=origin,
++            token=TOKEN,
++            novnc_dir=os.environ["NOVNC_DIR"],
++            synthetic=True,
++            windows_factory=windows_factory,
++        )
++        server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
++        thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
++        thread.start()
++        wait_for(lambda: server.started)
++        try:
++            yield app, provider, origin, jar
++        finally:
++            server.should_exit = True
++            thread.join(10)
++            sock.close()
++            assert not thread.is_alive(), "application did not stop"
++
++
++def rpc(origin, method, params):
++    response = httpx.post(
++        origin + "/mcp",
++        headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/json, text/event-stream"},
++        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
++        timeout=20,
++    )
++    assert response.status_code == 200, response.text
++    packet = response.json()
++    assert "error" not in packet, packet
++    return packet["result"]
++
++
++def new_link(origin):
++    result = rpc(origin, "tools/call", {"name": "amazon_connect", "arguments": {}})
++    assert not result.get("isError"), result
++    return json.loads(result["content"][0]["text"])["url"]
++
++
++def interact(page, url, *, reload=False):
++    page.goto(url)
++    page.locator("#go").click()
++    frame = page.frame_locator("iframe")
++    frame.locator("canvas").wait_for(timeout=15000)
++    page.wait_for_function("document.querySelector('#status').textContent.includes('Sign in')")
++    if reload:
++        page.reload()
++        frame = page.frame_locator("iframe")
++        frame.locator("canvas").wait_for(timeout=15000)
++    frame.locator("html.noVNC_connected").wait_for(timeout=15000)
++    # Test-only human input goes through the actual noVNC viewer, not the provider DOM.
++    frame.locator("canvas").click(position={"x": 200, "y": 200})
++    page.keyboard.press("Tab")
++    page.keyboard.press("Enter")
++
++
++def test_real_viewer_reload_sign_in_and_existing_mcp_tools(host):
++    app, provider, origin, jar = host
++    assert httpx.post(origin + "/mcp").status_code == 401
++    tools = rpc(origin, "tools/list", {})["tools"]
++    assert {"amazon_connect", "sign_in", "check_session", "get_orders"} <= {t["name"] for t in tools}
++    url = new_link(origin)
++    with sync_playwright() as playwright:
++        browser = playwright.chromium.launch(headless=True)
++        page = browser.new_page()
++        interact(page, url, reload=True)
++        wait_for(lambda: jar.exists())
++        wait_for(lambda: next(iter(app.state.connect.relay._links.values())).state == "connected")
++        assert provider.requests.count("/signin") == 1
++        page.locator("#done").wait_for(state="visible", timeout=15000)
++        assert "Connected" in page.locator("#done").inner_text()
++        browser.close()
++    result = rpc(origin, "tools/call", {"name": "check_session", "arguments": {}})
++    assert not result.get("isError"), result
++    assert '"signed_in": true' in result["content"][0]["text"]
++    assert "synthetic-accepted" in jar.read_text()
++    windows = list(app.state.windows._windows.values())
++    assert len(windows) == 1 and not windows[0].procs and not windows[0].profiles
++
++
++def test_verification_failure_preserves_existing_session(host):
++    app, provider, origin, jar = host
++    original = b'[{"name":"sid","value":"synthetic-previous","domain":"127.0.0.1"}]'
++    jar.write_bytes(original)
++    provider.reject = True
++    url = new_link(origin)
++    with sync_playwright() as playwright:
++        browser = playwright.chromium.launch(headless=True)
++        interact(browser.new_page(), url)
++        link = next(iter(app.state.connect.relay._links.values()))
++        wait_for(lambda: link.state == "failed")
++        browser.close()
++    assert jar.read_bytes() == original
++
++
++def test_saving_finishes_after_the_person_closes_the_page(host):
++    app, provider, origin, jar = host
++    url = new_link(origin)
++    with sync_playwright() as playwright:
++        browser = playwright.chromium.launch(headless=True)
++        page = browser.new_page()
++        interact(page, url)
++        wait_for(lambda: any(w.state == "saving" for w in app.state.windows._windows.values()))
++        page.close()
++        wait_for(lambda: jar.exists())
++        wait_for(lambda: next(iter(app.state.connect.relay._links.values())).state == "connected")
++        browser.close()
++    assert provider.requests.count("/signin") == 1
++
++
++def test_explicit_cancel_closes_the_browser_without_saving(host):
++    app, _provider, origin, jar = host
++    url = new_link(origin)
++    with sync_playwright() as playwright:
++        browser = playwright.chromium.launch(headless=True)
++        page = browser.new_page()
++        page.goto(url)
++        page.locator("#go").click()
++        page.frame_locator("iframe").locator("html.noVNC_connected").wait_for(timeout=15000)
++        page.get_by_role("button", name="Cancel", exact=True).click()
++        wait_for(lambda: all(w.state == "cancelled" for w in app.state.windows._windows.values()))
++        browser.close()
++    assert not jar.exists()
++    wait_for(lambda: all(not w.procs for w in app.state.windows._windows.values()))
++
++
++def test_an_older_attempt_cannot_publish_after_a_replacement_link(host):
++    app, _provider, origin, jar = host
++    original = b'[{"name":"sid","value":"synthetic-previous","domain":"127.0.0.1"}]'
++    jar.write_bytes(original)
++    url = new_link(origin)
++    with sync_playwright() as playwright:
++        browser = playwright.chromium.launch(headless=True)
++        page = browser.new_page()
++        interact(page, url)
++        wait_for(lambda: any(w.state == "saving" for w in app.state.windows._windows.values()))
++        assert new_link(origin) != url
++        wait_for(lambda: all(w.state == "failed" for w in app.state.windows._windows.values()))
++        browser.close()
++    assert jar.read_bytes() == original
+diff --git a/src/signin_window/client.py b/src/signin_window/client.py
+index 761fb0b..9fe240d 100644
+--- a/src/signin_window/client.py
++++ b/src/signin_window/client.py
+@@ -32,6 +32,88 @@ class LoginBusy(LoginUnavailable):
+     """Every window slot of the login service is in use."""
+ 
+ 
++class LocalBackend:
++    """Embed windows beside an application's login code, without an HTTP service.
++
++    Construct on the host's running event loop. Relay calls the synchronous methods
++    from worker threads; browser/profile ownership stays with the supplied runner.
++    Mount both ``windows.lifespan()`` and ``relay.lifespan()`` in the host.
++    """
++
++    def __init__(self, windows: Any, novnc_dir: str | Path) -> None:
++        self.windows = windows
++        self.novnc_dir = Path(novnc_dir).resolve()
++        self.loop = asyncio.get_running_loop()
++
++    def _run(self, operation):
++        # A synchronous call on the host loop would deadlock that same loop.
++        try:
++            current = asyncio.get_running_loop()
++        except RuntimeError:
++            current = None
++        if current is self.loop:
++            operation.close()
++            raise RuntimeError("call LocalBackend from a worker thread")
++        return asyncio.run_coroutine_threadsafe(operation, self.loop).result()
++
++    def start(self, layout: str = "desktop", **params: Any) -> dict[str, Any]:
++        from .service import Busy
++
++        try:
++            window = self._run(self.windows.start(layout, params))
++        except Busy:
++            raise LoginBusy("busy") from None
++        except (OSError, RuntimeError, ValueError):
++            raise LoginUnavailable("could not start the local window") from None
++        return {**window.public(), "view_token": window.view_token}
++
++    def state(self, window_id: str) -> dict[str, Any]:
++        async def read():
++            window = self.windows.get(window_id)
++            return window.public() if window else {"state": "unknown"}
++
++        return self._run(read())
++
++    def result(self, window_id: str) -> dict[str, Any] | None:
++        async def take():
++            return self.windows.take(window_id)
++
++        return self._run(take())
++
++    def close(self, window_id: str) -> None:
++        self._run(self.windows.close(window_id))
++
++    def static(self, path: str, window_id: str | None = None) -> tuple[int, bytes, str]:
++        import mimetypes
++
++        if not STATIC.fullmatch(path):
++            return 404, b"", ""
++        file = (self.novnc_dir / path).resolve()
++        if not file.is_relative_to(self.novnc_dir) or not file.is_file():
++            return 404, b"", ""
++        try:
++            with file.open("rb") as stream:
++                data = stream.read(MAX_STATIC + 1)
++        except OSError:
++            return 404, b"", ""
++        if len(data) > MAX_STATIC:
++            return 404, b"", ""
++        return 200, data, mimetypes.guess_type(path)[0] or "application/octet-stream"
++
++    async def bridge(self, window_id: str, view_token: str, ws: Any) -> None:
++        from .service import _pipe
++
++        window = self.windows.get(window_id)
++        if window is None or not window.view_ok(view_token) or window.state != "waiting":
++            await ws.close(code=4404)
++            return
++        try:
++            reader, writer = await asyncio.open_connection("127.0.0.1", window.vnc_port)
++        except OSError:
++            raise LoginUnavailable("local viewer unavailable") from None
++        await _pipe(ws, reader, writer, lambda: window.state == "waiting")
++
++
+ class _NoRedirects(urllib.request.HTTPRedirectHandler):
+     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+         return None
+diff --git a/src/signin_window/page.py b/src/signin_window/page.py
+index b2f2b06..44f50fc 100644
+--- a/src/signin_window/page.py
++++ b/src/signin_window/page.py
+@@ -46,6 +46,8 @@ class PageText:
+     starting: str = "Opening {service}…"
+     waiting: str = "Sign in as you usually do. This page notices when you're in."
+     saving: str = "Signed in. Saving…"
++    #: Keep an active attempt on reload. Requires the host's relay/window lifespans.
++    reconnect: bool = False
+     #: State -> HTML shown when the link ends in that state; your own final states go here too.
+     outcomes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_OUTCOMES))
+     #: States whose message offers "Try again".
+@@ -92,6 +94,7 @@ def render(text: PageText, label: str | None) -> str:
+         "noRetry": list(text.no_retry),
+         "secureHost": text.secure_host,
+         "frameTitle": text.plain(text.title, label),
++        "reconnect": text.reconnect,
+     }
+     # JSON in a script element: "</" would end it, so it is escaped.
+     script = (
+@@ -202,5 +205,25 @@ async function begin() {
+   poll();
+ }
+ $("go").addEventListener("click", begin);
+-addEventListener("pagehide", () => { if (!over && navigator.sendBeacon) navigator.sendBeacon(`${base}/cancel`); });
++const cancel = document.createElement("button");
++cancel.textContent = "Cancel";
++cancel.hidden = true;
++document.querySelector("header").appendChild(cancel);
++cancel.addEventListener("click", async () => {
++  await fetch(`${base}/cancel`, {method: "POST"});
++  show(await (await fetch(`${base}/state`, {cache: "no-store"})).json());
++});
++if (CONFIG.reconnect) {
++  (async () => {
++    const s = await (await fetch(`${base}/state`, {cache: "no-store"})).json();
++    if (s.state !== "ready") {
++      $("intro").hidden = true;
++      document.querySelector("header .bar").hidden = false;
++      if (!show(s)) poll();
++    }
++  })().catch(() => {});
++  setInterval(() => { cancel.hidden = over || $("intro").hidden === false; }, 250);
++} else {
++  addEventListener("pagehide", () => { if (!over && navigator.sendBeacon) navigator.sendBeacon(`${base}/cancel`); });
++}
+ </script>"""
+diff --git a/src/signin_window/relay.py b/src/signin_window/relay.py
+index b93e156..20e7cf6 100644
+--- a/src/signin_window/relay.py
++++ b/src/signin_window/relay.py
+@@ -33,7 +33,9 @@ Routes, under the prefix you mount them at::
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import collections
++import contextlib
+ import logging
+ import re
+ import secrets
+@@ -193,6 +195,36 @@ class Relay:
+ 
+     # -- links ----------------------------------------------------------------------------------------------------
+ 
++    @contextlib.asynccontextmanager
++    async def lifespan(self):
++        """Reconcile completion and expiry without a connected page.
++
++        Mount once when using ``routes``; ``app`` installs this automatically.
++        Backends and hooks must honor their own bounded I/O timeouts.
++        """
++
++        stop = asyncio.Event()
++
++        async def follow():
++            while not stop.is_set():
++                await anyio.to_thread.run_sync(self.tick)
++                with contextlib.suppress(TimeoutError):
++                    await asyncio.wait_for(stop.wait(), timeout=0.1)
++
++        task = asyncio.create_task(follow())
++        try:
++            yield self
++        finally:
++            stop.set()
++            await task  # never abandon a completion hook in a worker during shutdown
++
++    def tick(self) -> None:
++        with self._lock:
++            self._expire(self._clock())
++            links = list(self._links.values())
++        for link in links:
++            self.advance(link)
++
+     def create(self, key: str, *, params: dict[str, Any] | None = None, label: str | None = None) -> Link:
+         """A link for ``key`` (what it signs in: an account, a site); it replaces any open link of that key.
+         ``params`` go to the login service with each start; ``label`` is what the page names (default: the key)."""
+@@ -434,7 +466,13 @@ class Relay:
+ 
+     def app(self) -> Starlette:
+         """The routes as an app of their own, to mount where ``public_url`` points."""
+-        return Starlette(routes=self.routes())
++
++        @contextlib.asynccontextmanager
++        async def lifespan(_app):
++            async with self.lifespan():
++                yield
++
++        return Starlette(routes=self.routes(), lifespan=lifespan)
+ 
+ 
+ def with_paste(page: bytes) -> bytes:
+diff --git a/src/signin_window/service.py b/src/signin_window/service.py
+index f954d95..91c6880 100644
+--- a/src/signin_window/service.py
++++ b/src/signin_window/service.py
+@@ -89,6 +89,7 @@ class Window:
+     info: dict[str, str] = field(default_factory=dict)
+     result: dict[str, Any] | None = field(default=None, repr=False)
+     result_at: float | None = None
++    saving_at: float | None = None
+     ended_at: float | None = None
+     procs: list[Any] = field(default_factory=list, repr=False)
+     profiles: list[str] = field(default_factory=list, repr=False)
+@@ -140,6 +141,7 @@ class Window:
+         window no longer interrupts the runner (the sign-in is done)."""
+         if self.state in ("starting", "waiting"):
+             self.state = "saving"
++            self.saving_at = time.monotonic()
+ 
+     def at(self, host: str) -> None:
+         """The host the window shows now (the page tells the person where they are)."""
+@@ -189,9 +191,16 @@ class Windows:
+         display_base: int = 90,
+         vnc_base: int = 5990,
+         clock: Callable[[], float] = time.monotonic,
++        display: str | None = None,
++        save_seconds: float = 30,
+     ) -> None:
+         if slots < 1 or slots > 9:
+             raise ValueError("slots must be 1 to 9")
++        if display is not None and (slots != 1 or not re.fullmatch(r":\d+", display)):
++            raise ValueError("an existing local display requires one slot and a :number address")
++        if save_seconds <= 0:
++            raise ValueError("save_seconds must be positive")
++        self.display, self.save_seconds = display, save_seconds
+         self.runner, self.slots, self.limit = runner, slots, minutes * 60
+         self.xvfb, self.x11vnc = xvfb, x11vnc
+         self.lock, self.lock_wait = lock, lock_wait
+@@ -266,6 +275,36 @@ class Windows:
+     async def close_all(self) -> None:
+         for window_id in list(self._windows):
+             await self.close(window_id)
++        saving = [w for w in self._windows.values() if w.state == "saving" and w.task is not None]
++        if saving:
++            tasks = [w.task for w in saving]
++            _, pending = await asyncio.wait(tasks, timeout=self.save_seconds)
++            for task in pending:
++                task.cancel()
++            await asyncio.gather(*tasks, return_exceptions=True)
++
++    @contextlib.asynccontextmanager
++    async def lifespan(self):
++        """Enforce deadlines without API traffic; drain owned work when the host stops.
++
++        Mount this once in an embedded application's lifespan. Synchronous runners must
++        cooperate with cancellation, or run as an owned child process.
++        """
++
++        async def supervise():
++            while True:
++                with self._guard:
++                    self._reap()
++                await asyncio.sleep(0.1)
++
++        watchdog = asyncio.create_task(supervise())
++        try:
++            yield self
++        finally:
++            watchdog.cancel()
++            with contextlib.suppress(asyncio.CancelledError):
++                await watchdog
++            await self.close_all()
+ 
+     async def close_key(self, key: str) -> None:
+         """Close every window of ``key`` (an account being removed, say)."""
+@@ -273,6 +312,8 @@ class Windows:
+             await self.close(window.id)
+ 
+     def _cancel(self, window: Window) -> None:
++        if window.cancelled.is_set():
++            return  # repeated deadline checks must not interrupt a runner's cleanup
+         window.cancelled.set()
+         if window.task is not None and not window.task.done():
+             window.task.cancel()
+@@ -281,6 +322,13 @@ class Windows:
+         """Windows past their time are stopped; untaken sessions and ended windows are dropped (hold ``_guard``)."""
+         now = self._clock()
+         for window in list(self._windows.values()):
++            if (
++                window.state == "saving"
++                and window.saving_at is not None
++                and time.monotonic() - window.saving_at > self.save_seconds
++            ):
++                self._cancel(window)
++                continue
+             if window.state in ("starting", "waiting") and now > window.deadline:
+                 self._cancel(window)
+             elif window.state == "signed_in" and window.result_at is not None and now - window.result_at > RESULT_TTL:
+@@ -332,6 +380,8 @@ class Windows:
+         except asyncio.CancelledError:
+             window.cancelled.set()
+             await asyncio.wait({worker})
++            with contextlib.suppress(Exception):
++                worker.result()  # retrieve a cooperative runner's cancellation failure
+             raise
+ 
+     def _end(self, window: Window, state: str, error: str | None = None, result: dict[str, Any] | None = None) -> None:
+@@ -359,9 +409,18 @@ class Windows:
+         window's, or one a just-ended window has not released yet, are skipped), and wait until both are ready."""
+         with self._guard:
+             others = [w for w in self._windows.values() if w is not window and w.ended_at is None]
+-            window.display_number = self._free_display({w.display_number for w in others})
++            window.display_number = (
++                int(self.display[1:])
++                if self.display is not None
++                else self._free_display({w.display_number for w in others})
++            )
+             window.vnc_number = self._free_port({w.vnc_number for w in others})
+         width, height = window.size
++        if self.display is None:
++            self._start_xvfb(window, width, height)
++        self._start_vnc(window)
++
++    def _start_xvfb(self, window: Window, width: int, height: int) -> None:
+         window.procs.append(
+             subprocess.Popen(
+                 [self.xvfb, window.display, "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp"],
+@@ -370,6 +429,8 @@ class Windows:
+             )
+         )
+         self._wait(lambda: (self.x_tmp / ".X11-unix" / f"X{window.display_number}").exists(), window, "Xvfb")
++
++    def _start_vnc(self, window: Window) -> None:
+         # Loopback only: the service's WebSocket bridge, behind the view token, is the one way in.
+         window.procs.append(
+             subprocess.Popen(
+@@ -620,8 +681,8 @@ def build_app(
+ 
+     @contextlib.asynccontextmanager
+     async def lifespan(_: Starlette):  # type: ignore[no-untyped-def]
+-        yield
+-        await windows.close_all()  # on shutdown: runners stop, displays and profiles go
++        async with windows.lifespan():
++            yield
+ 
+     middleware = [Middleware(BearerOnly, token=token, direct_view=direct_view)]
+     return Starlette(routes=all_routes, middleware=middleware, lifespan=lifespan)
+diff --git a/tests/test_embedded.py b/tests/test_embedded.py
+new file mode 100644
+index 0000000..d9fc981
+--- /dev/null
++++ b/tests/test_embedded.py
+@@ -0,0 +1,185 @@
++"""Embedded kept sessions: no HTTP result transfer or page-driven completion."""
++
++import asyncio
++import contextlib
++import threading
++import time
++
++import pytest
++from starlette.applications import Starlette
++from starlette.testclient import TestClient
++
++from signin_window.client import LocalBackend
++from signin_window.page import PageText
++from signin_window.relay import Relay
++from signin_window.service import Windows
++
++
++def until(predicate):
++    deadline = time.monotonic() + 3
++    while not predicate():
++        assert time.monotonic() < deadline
++        time.sleep(0.01)
++
++
++def test_completion_without_page_polls_and_reload_does_not_start_again(tmp_path):
++    release = threading.Event()
++    saved = []
++    starts = []
++
++    async def runner(window):
++        starts.append(window.id)
++        window.waiting("accounts.example.com")
++        while not release.is_set():
++            await asyncio.sleep(0.01)
++        window.saving()
++        await asyncio.sleep(0.05)
++        saved.append(window.id)
++        window.finish("connected")
++
++    windows = Windows(runner)
++    windows.start_display = lambda window: None
++    windows.stop_display = lambda window: None
++
++    @contextlib.asynccontextmanager
++    async def lifespan(app):
++        backend = LocalBackend(windows, tmp_path)
++        relay = Relay(backend, "https://example.com/connect", text=PageText(reconnect=True))
++        app.router.routes.extend(relay.routes("/connect"))
++        app.state.link = relay.create("example-account")
++        async with windows.lifespan(), relay.lifespan():
++            yield
++
++    app = Starlette(lifespan=lifespan)
++    with TestClient(app) as client:
++        link = app.state.link
++        path = "/connect/" + link.id
++        client.post(path + "/start", json={"layout": "desktop"})
++        until(lambda: link.state == "waiting")
++        # Reload and duplicate starts attach to the current attempt.
++        assert client.get(path).status_code == 200
++        client.post(path + "/start", json={})
++        assert len(starts) == 1
++        release.set()
++        until(lambda: link.state == "connected")  # no /state request drives the save
++        assert saved == starts
++        assert "cookies" not in client.get(path + "/state").text
++
++
++def test_deadline_without_any_api_requests():
++    async def exercise():
++        stopped = []
++
++        async def runner(window):
++            window.waiting()
++            await asyncio.Event().wait()
++
++        windows = Windows(runner, minutes=0.001)
++        windows.start_display = lambda window: None
++        windows.stop_display = lambda window: stopped.append(window.id)
++        async with windows.lifespan():
++            window = await windows.start()
++            await asyncio.sleep(0.25)
++            assert window.state == "expired"
++            assert stopped == [window.id]
++
++    asyncio.run(exercise())
++
++
++def test_saving_closes_view_and_survives_cancel_but_is_bounded():
++    async def exercise():
++        saved = []
++
++        async def runner(window):
++            window.waiting()
++            window.saving()
++            await asyncio.sleep(0.1)
++            saved.append(window.id)
++            window.finish("connected")
++
++        windows = Windows(runner, save_seconds=1)
++        windows.start_display = lambda window: None
++        windows.stop_display = lambda window: None
++        async with windows.lifespan():
++            window = await windows.start()
++            await asyncio.sleep(0.02)
++            await windows.close(window.id)
++            assert window.state == "saving"
++        assert window.state == "connected" and saved == [window.id]
++
++        async def stalled(window):
++            window.saving()
++            await asyncio.Event().wait()
++
++        windows = Windows(stalled, save_seconds=0.05)
++        windows.start_display = lambda window: None
++        windows.stop_display = lambda window: None
++        async with windows.lifespan():
++            window = await windows.start()
++            await asyncio.sleep(0.25)
++            assert window.state == "cancelled"
++
++    asyncio.run(exercise())
++
++
++def test_existing_display_is_borrowed_and_only_vnc_is_owned(monkeypatch):
++    commands = []
++
++    class Process:
++        def __init__(self, argv, **kwargs):
++            commands.append(argv)
++
++        def poll(self):
++            return None
++
++        def terminate(self):
++            commands.append("terminated")
++
++        def wait(self, **kwargs):
++            return 0
++
++    monkeypatch.setattr("signin_window.service.subprocess.Popen", Process)
++    windows = Windows(lambda window: None, display=":88")
++    windows._wait = lambda *args: None
++    windows._free_port = lambda taken: 5999
++
++    async def exercise():
++        window = await windows.start()
++        assert window.display == ":88"
++        await window.task
++
++    asyncio.run(exercise())
++    assert commands[0][0] == "x11vnc"
++    assert commands[0][commands[0].index("-display") + 1] == ":88"
++    assert commands[1:] == ["terminated"]
++    with pytest.raises(ValueError):
++        Windows(lambda window: None, display=":88", slots=2)
++
++
++def test_repeated_deadline_checks_do_not_release_a_running_sync_runner():
++    async def exercise():
++        release = threading.Event()
++        exited = threading.Event()
++        cleaned = []
++
++        def runner(window):
++            window.waiting()
++            window.cancelled.wait(3)
++            release.wait(3)  # cooperative shutdown that lasts more than one watchdog tick
++            exited.set()
++
++        windows = Windows(runner, minutes=0.001)
++        windows.start_display = lambda window: None
++        windows.stop_display = lambda window: cleaned.append(exited.is_set())
++        async with windows.lifespan():
++            window = await windows.start()
++            try:
++                await asyncio.sleep(0.35)
++                assert window.cancelled.is_set()
++                assert window.ended_at is None and cleaned == []
++            finally:
++                release.set()
++                await window.task
++            assert cleaned == [True]
++
++    asyncio.run(exercise())

@@ -1,0 +1,124 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6c6bbc4..e99e9f8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
+ 
+ ## [Unreleased](https://github.com/alexdlaird/amazon-orders-mcp/compare/2.1.0...HEAD)
+ 
++### Added
++
++- `SavedSession.sign_in_with()` to run an application's sign-in adapter under the normal per-site lock.
++
+ ## [2.1.0](https://github.com/alexdlaird/amazon-orders-mcp/compare/2.0.1...2.1.0) - 2026-10-25
+ 
+ ### Added
+diff --git a/README.md b/README.md
+index defb3f6..9899b2e 100644
+--- a/README.md
++++ b/README.md
+@@ -126,6 +126,11 @@ and [troubleshooting](https://amazon-orders.readthedocs.io/troubleshooting.html)
+ 
+ ## Contributing
+ 
++Applications composing their own tools can use `create_server(saved_session, additional_instructions=...)`.
++An external sign-in adapter can call `saved_session.sign_in_with(callback, site)`: the callback receives the
++site's `AmazonSession`, even when signed out, under the same lock as tool calls. It must verify and publish the
++session before returning. This extension does not install a viewer or change the built-in `sign_in` tool.
++
+ Want to contribute financially? If you've found `amazon-orders-mcp`
+ useful, [sponsorship](https://github.com/sponsors/alexdlaird) would
+ be greatly appreciated!
+diff --git a/amazonorders_mcp/session.py b/amazonorders_mcp/session.py
+index eea6a9b..7521a29 100644
+--- a/amazonorders_mcp/session.py
++++ b/amazonorders_mcp/session.py
+@@ -142,6 +142,25 @@ class SavedSession:
+ 
+         return site_session.sign_in_status if site_session else WAITING_TO_SIGN_IN_STATUS
+ 
++    def sign_in_with(self,
++                     login: Callable[[AmazonSession], None],
++                     site: Optional[str] = None) -> None:
++        """Run an application's sign-in adapter under this site's normal tool lock.
++
++        The adapter receives the site's session even when signed out, and must verify and
++        publish a session before returning. Other calls to this site wait; different sites
++        remain independent. This method starts no browser and chooses no login mechanism.
++        """
++        site_session = self._site_session(site)
++        with site_session.lock:
++            amazon_session = site_session._session()
++            try:
++                login(amazon_session)
++                if not amazon_session.is_authenticated:
++                    raise AmazonOrdersAuthError("The sign-in adapter did not establish a verified session.")
++            finally:
++                site_session._loaded_cookie_jar_mtime = amazon_session.cookie_jar_mtime
++
+     def get_config(self) -> Dict[str, Dict[str, Any]]:
+         """
+         Get the current value of each config key in :data:`PREFERENCE_KEYS` and :data:`TUNING_KEYS`.
+diff --git a/tests/unit/test_sign_in_adapter.py b/tests/unit/test_sign_in_adapter.py
+new file mode 100644
+index 0000000..c7383f4
+--- /dev/null
++++ b/tests/unit/test_sign_in_adapter.py
+@@ -0,0 +1,57 @@
++import threading
++
++from amazonorders.exception import AmazonOrdersAuthError
++
++from tests.unittestcase import UnitTestCase
++
++
++class TestSignInAdapter(UnitTestCase):
++    def test_signed_out_session_can_be_passed_to_an_adapter(self):
++        seen = []
++
++        def login(session):
++            seen.append(session.config.site)
++            session.is_authenticated = True
++
++        self.saved_session.sign_in_with(login, "amazon.de")
++        self.assertEqual(["amazon.de"], seen)
++        self.assertEqual("amazon.com", self.saved_session.site())
++
++    def test_unverified_completion_is_refused_and_lock_is_released(self):
++        with self.assertRaises(AmazonOrdersAuthError):
++            self.saved_session.sign_in_with(lambda session: None)
++        self.test_signed_out_session_can_be_passed_to_an_adapter()
++
++    def test_another_call_to_the_same_site_waits_for_the_adapter(self):
++        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
++        errors = []
++
++        def first_login(session):
++            entered.set()
++            if not release.wait(3):
++                raise AssertionError("adapter never released")
++            session.is_authenticated = True
++
++        def second_login(session):
++            finished.set()
++            session.is_authenticated = True
++
++        def call(login):
++            try:
++                self.saved_session.sign_in_with(login)
++            except BaseException as error:
++                errors.append(error)
++
++        first = threading.Thread(target=call, args=(first_login,))
++        second = threading.Thread(target=call, args=(second_login,))
++        first.start()
++        self.assertTrue(entered.wait(3))
++        second.start()
++        try:
++            self.assertFalse(finished.wait(0.05))
++        finally:
++            release.set()
++            first.join(3)
++            second.join(3)
++        self.assertTrue(finished.is_set())
++        self.assertEqual([], errors)

@@ -1,0 +1,176 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ded0e0a..49ff85d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
+ 
+ ## [Unreleased](https://github.com/alexdlaird/amazon-orders/compare/5.2.0...HEAD)
+ 
++### Added
++
++- `PlaywrightBrowserLogin.launch_env()` for a browser-child environment, including isolated displays.
++
+ ## [5.2.0](https://github.com/alexdlaird/amazon-orders/compare/5.1.0...5.2.0) - 2026-10-25
+ 
+ ### Added
+diff --git a/amazonorders/contrib/browser/playwright.py b/amazonorders/contrib/browser/playwright.py
+index 3d652b2..cb3728c 100644
+--- a/amazonorders/contrib/browser/playwright.py
++++ b/amazonorders/contrib/browser/playwright.py
+@@ -62,13 +62,15 @@ class PlaywrightBrowserLauncher:
+     def launch(self,
+                pw: Any,
+                headless: bool,
+-               args: Optional[List[str]] = None) -> Any:
++               args: Optional[List[str]] = None,
++               env: Optional[Dict[str, str]] = None) -> Any:
+         """
+         Launch the browser the config selects.
+ 
+         :param pw: The running Playwright instance.
+         :param headless: Whether to launch the browser without a window.
+         :param args: Command line arguments to launch the browser with, beside Playwright's own.
++        :param env: An optional browser-child environment, without changing this process's environment.
+         :return: The launched Playwright ``Browser``.
+         :raises AmazonOrdersBrowserNotInstalledError: If no browser is installed to launch.
+         :raises AmazonOrdersError: If the browser can't be launched.
+@@ -78,9 +80,9 @@ class PlaywrightBrowserLauncher:
+         browser_name = self.config.browser
+         executable_path = self.config.browser_executable_path
+         if not browser_name and not executable_path:
+-            return self._launch_default(pw, headless, args)
++            return self._launch_default(pw, headless, args, env)
+ 
+-        launch_options = self._launch_options(headless, args)
++        launch_options = self._launch_options(headless, args, env)
+         channel = None
+         browser_type = self._browser_types(pw).get(browser_name or self.FALLBACK_BROWSER_TYPE)
+         if browser_type is None:
+@@ -131,10 +133,11 @@ class PlaywrightBrowserLauncher:
+     def _launch_default(self,
+                         pw: Any,
+                         headless: bool,
+-                        args: Optional[List[str]]) -> Any:
++                        args: Optional[List[str]],
++                        env: Optional[Dict[str, str]] = None) -> Any:
+         from playwright.sync_api import Error as PlaywrightError  # type: ignore[import-not-found]
+ 
+-        launch_options = self._launch_options(headless, args)
++        launch_options = self._launch_options(headless, args, env)
+         for channel in (self.DEFAULT_BROWSER_CHANNEL, self.FALLBACK_BROWSER_CHANNEL):
+             try:
+                 return pw.chromium.launch(channel=channel, **launch_options)
+@@ -161,10 +164,13 @@ class PlaywrightBrowserLauncher:
+ 
+     @staticmethod
+     def _launch_options(headless: bool,
+-                        args: Optional[List[str]]) -> Dict[str, Any]:
++                        args: Optional[List[str]],
++                        env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+         launch_options: Dict[str, Any] = {"headless": headless}
+         if args:
+             launch_options["args"] = args
++        if env is not None:
++            launch_options["env"] = env
+ 
+         return launch_options
+ 
+@@ -844,7 +850,9 @@ class PlaywrightBrowserLogin:
+         sign_in_url = f"{constants.SIGN_IN_URL}?{urlencode(constants.SIGN_IN_QUERY_PARAMS)}"
+ 
+         with sync_playwright() as pw:
+-            browser = PlaywrightBrowserLauncher(self.config).launch(pw, self.headless, self.launch_args())
++            env = self.launch_env()
++            options = {"env": env} if env is not None else {}
++            browser = PlaywrightBrowserLauncher(self.config).launch(pw, self.headless, self.launch_args(), **options)
+ 
+             try:
+                 context = self.new_context(browser)
+@@ -872,6 +880,14 @@ class PlaywrightBrowserLogin:
+         """
+         return None
+ 
++    def launch_env(self) -> Optional[Dict[str, str]]:
++        """Optional child environment, for an isolated display or credential filtering.
++
++        The default lets Playwright inherit the current environment, as before. Returning a
++        mapping affects only the browser child; it never changes the caller's environment.
++        """
++        return None
++
+     def new_context(self,
+                     browser: Any) -> Any:
+         """
+@@ -921,7 +937,10 @@ class PlaywrightBrowserLogin:
+             logger.debug(f"Skipped pre-filling the username in the browser: {e}")
+ 
+     def _require_display(self) -> None:
+-        if not self.headless and not has_display():
++        env = self.launch_env()
++        available = has_display() if env is None else (not sys.platform.startswith("linux") or
++                                                       bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")))
++        if not self.headless and not available:
+             raise AmazonOrdersError("Signing in with a browser requires a display, and this machine doesn't have one.")
+ 
+     def wait_for_sign_in(self,
+diff --git a/docs/browser.rst b/docs/browser.rst
+index d8651d7..a3ee047 100644
+--- a/docs/browser.rst
++++ b/docs/browser.rst
+@@ -105,6 +105,11 @@ To customize the sign-in, subclass :class:`~amazonorders.contrib.browser.playwri
+ override its hooks, like ``on_sign_in_page()`` and ``wait_for_sign_in()``. Set ``headless`` to ``True`` if no browser
+ window is needed.
+ 
++Override ``launch_env()`` to supply the browser child's environment, for example a
++dedicated ``DISPLAY`` or a mapping excluding application credentials. The display
++preflight checks this mapping on Linux. The default is ``None`` (normal environment
++inheritance); this never changes the parent process's environment or browser selection.
++
+ .. code-block:: python
+ 
+     from amazonorders.contrib.browser.playwright import PlaywrightBrowserLogin
+diff --git a/tests/unit/contrib/test_browser_environment.py b/tests/unit/contrib/test_browser_environment.py
+new file mode 100644
+index 0000000..16a7748
+--- /dev/null
++++ b/tests/unit/contrib/test_browser_environment.py
+@@ -0,0 +1,39 @@
++import os
++import unittest
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++from amazonorders.contrib.browser.playwright import PlaywrightBrowserLauncher, PlaywrightBrowserLogin
++from amazonorders.exception import AmazonOrdersError
++
++
++class TestBrowserEnvironment(unittest.TestCase):
++    @patch("amazonorders.contrib.browser.playwright.sys.platform", "linux")
++    def test_display_preflight_uses_the_supplied_child_environment(self):
++        login = PlaywrightBrowserLogin(SimpleNamespace(config=None))
++        with patch.dict(os.environ, {"DISPLAY": ""}, clear=True):
++            with patch.object(login, "launch_env", return_value={"DISPLAY": ":123"}):
++                login._require_display()
++        with patch.dict(os.environ, {"DISPLAY": ":88"}):
++            with patch.object(login, "launch_env", return_value={}):
++                with self.assertRaises(AmazonOrdersError):
++                    login._require_display()
++
++    def test_default_browser_receives_child_environment_without_mutating_parent(self):
++        config = SimpleNamespace(browser=None, browser_executable_path=None)
++        playwright = SimpleNamespace(chromium=MagicMock())
++        environment = {"DISPLAY": ":123", "PATH": "/usr/bin"}
++        with patch.dict(os.environ, {"DISPLAY": ":88"}):
++            PlaywrightBrowserLauncher(config).launch(playwright, False, env=environment)
++            self.assertEqual(":88", os.environ["DISPLAY"])
++        self.assertEqual(environment, playwright.chromium.launch.call_args.kwargs["env"])
++
++    def test_selected_executable_receives_environment_and_defaults_still_inherit(self):
++        config = SimpleNamespace(browser="chromium", browser_executable_path="/synthetic/chrome")
++        browser_type = MagicMock()
++        launcher = PlaywrightBrowserLauncher(config)
++        with patch.object(launcher, "_browser_types", return_value={"chromium": browser_type}):
++            launcher.launch(object(), False, env={"DISPLAY": ":123"})
++            self.assertEqual({"DISPLAY": ":123"}, browser_type.launch.call_args.kwargs["env"])
++            launcher.launch(object(), False)
++            self.assertNotIn("env", browser_type.launch.call_args.kwargs)

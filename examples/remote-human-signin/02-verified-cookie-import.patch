@@ -1,0 +1,227 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 49ff85d..5e6d566 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
+ ### Added
+ 
+ - `PlaywrightBrowserLogin.launch_env()` for a browser-child environment, including isolated displays.
++- `AmazonSession.import_cookies()` to verify and atomically publish an externally obtained browser session.
+ 
+ ## [5.2.0](https://github.com/alexdlaird/amazon-orders/compare/5.1.0...5.2.0) - 2026-10-25
+ 
+diff --git a/amazonorders/session.py b/amazonorders/session.py
+index e6a7d88..c8ac093 100644
+--- a/amazonorders/session.py
++++ b/amazonorders/session.py
+@@ -1,12 +1,13 @@
+ __copyright__ = "Copyright (c) 2024-2025 Alex Laird"
+ __license__ = "MIT"
+ 
++import copy
+ import json
+ import logging
+ import os
+ import tempfile
+ import time
+-from typing import Any, Dict, List, Optional, Union
++from typing import Any, Dict, List, Optional, Tuple, Union
+ from urllib.parse import urlparse
+ 
+ import requests
+@@ -326,6 +327,61 @@ class AmazonSession:
+ 
+         return True
+ 
++    def import_cookies(self,
++                       cookies: object) -> None:
++        """Verify browser cookies in an isolated session, then atomically publish them.
++
++        Only cookies for this Amazon site are accepted. Verification failure leaves the previous
++        cookie jar and in-memory session untouched. A jar replaced during verification is refused.
++        Callers must serialize publication with other writers; the file lock coordinates threads
++        in this process, not independent processes. No credentials or sign-in forms are used.
++        """
++        domain = (urlparse(self.config.constants.BASE_URL).hostname or "").removeprefix("www.")
++        if not isinstance(cookies, list) or not cookies:
++            raise AmazonOrdersAuthError("No browser session was supplied.")
++        for cookie in cookies:
++            if not isinstance(cookie, dict) or not all(isinstance(cookie.get(k), str) for k in
++                                                       ("name", "value", "domain")):
++                raise AmazonOrdersAuthError("Invalid browser session.")
++            host = cookie["domain"].lstrip(".").lower()
++            if host != domain and not host.endswith("." + domain):
++                raise AmazonOrdersAuthError("Browser cookies belong to another site.")
++
++        def revision() -> Optional[Tuple[int, int, int, int]]:
++            try:
++                stat = os.stat(self.config.cookie_jar_path)
++                return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
++            except FileNotFoundError:
++                return None
++
++        with cookies_file_lock:
++            previous_revision = revision()
++        with tempfile.TemporaryDirectory(prefix="amazon-session-") as directory:
++            config = copy.deepcopy(self.config)
++            config.cookie_jar_path = os.path.join(directory, "cookies.json")
++            if config.cookie_jar_path != os.path.join(directory, "cookies.json"):
++                raise AmazonOrdersError("The cookie jar environment override prevents isolated verification.")
++            candidate = AmazonSession(config=config, io=self.io)
++            try:
++                candidate.session.cookies.clear()
++                candidate._load_cookie_jar_data(cookies)
++                if not candidate.check_session(verify=True):
++                    raise AmazonOrdersAuthError("Amazon did not accept the browser session.")
++                with cookies_file_lock:
++                    if revision() != previous_revision:
++                        raise AmazonOrdersAuthError("The saved session changed during verification; retry the import.")
++                    previous_cookies = self.session.cookies
++                    self.session.cookies = candidate.session.cookies.copy()
++                    try:
++                        self._write_cookie_jar()
++                    except BaseException:
++                        self.session.cookies = previous_cookies
++                        raise
++                    self.is_authenticated = True
++                    self._sign_in_required = False
++            finally:
++                candidate.session.close()
++
+     def login(self) -> None:
+         """
+         Execute an Amazon login process. This will include the sign-in page, and may also include OTP (if 2FA is
+diff --git a/docs/browser.rst b/docs/browser.rst
+index a3ee047..14b1ae7 100644
+--- a/docs/browser.rst
++++ b/docs/browser.rst
+@@ -125,3 +125,17 @@ inheritance); this never changes the parent process's environment or browser sel
+ If a supported extra isn't working for you, please
+ `open an issue <https://github.com/alexdlaird/amazon-orders/issues/new?assignees=&labels=bug&projects=&template=bug-report.yml>`_
+ or a `pull request <https://github.com/alexdlaird/amazon-orders/compare>`_.
++
++Importing a Browser Session
++--------------------------
++
++An application with its own browser can call ``amazon_session.import_cookies(cookies)``
++with Playwright-shaped cookie dictionaries. Only the active site's cookies are accepted.
++The method verifies the candidate in a temporary session before atomically replacing
++the normal jar and activating it in memory. Verification and saving failures preserve
++the previous session. A jar replaced during verification is refused.
++
++Serialize this call with other session writers. The existing cookie-file lock protects
++threads in this process; it is not a cross-process transaction. Applications must also
++reject superseded attempts before invoking publication. No credentials or sign-in forms
++are used by this method.
+diff --git a/tests/unit/test_import_cookies.py b/tests/unit/test_import_cookies.py
+new file mode 100644
+index 0000000..b04e632
+--- /dev/null
++++ b/tests/unit/test_import_cookies.py
+@@ -0,0 +1,94 @@
++import json
++import os
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++import responses
++
++from amazonorders.conf import AmazonOrdersConfig
++from amazonorders.exception import AmazonOrdersAuthError, AmazonOrdersError
++from amazonorders.session import AmazonSession
++
++
++class TestImportCookies(unittest.TestCase):
++    def setUp(self):
++        environment = {k: v for k, v in os.environ.items() if not k.startswith("AMAZON_")}
++        self.environment = patch.dict(os.environ, environment, clear=True)
++        self.environment.start()
++        self.addCleanup(self.environment.stop)
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.jar = Path(self.directory.name) / "cookies.json"
++        self.config = AmazonOrdersConfig(data={"cookie_jar_path": str(self.jar)})
++        self.cookies = [{"name": name, "value": "synthetic-new", "domain": ".amazon.com"}
++                        for name in self.config.constants.COOKIES_SET_WHEN_AUTHENTICATED]
++        self.old = [{**c, "value": "synthetic-old"} for c in self.cookies]
++        self.jar.write_text(json.dumps(self.old))
++        self.session = AmazonSession(config=self.config)
++        self.addCleanup(self.session.session.close)
++
++    @responses.activate
++    def test_verified_session_is_published_and_readable_by_a_fresh_session(self):
++        responses.get(self.config.constants.ORDER_HISTORY_URL, body="<html>Orders</html>")
++        self.session._sign_in_required = True
++        self.session.import_cookies(self.cookies)
++        fresh = AmazonSession(config=self.config)
++        self.addCleanup(fresh.session.close)
++        self.assertTrue(fresh.check_session())
++        self.assertTrue(self.session.is_authenticated)
++        self.assertFalse(self.session._sign_in_required)
++        self.assertEqual("synthetic-new", fresh.session.cookies.get(self.cookies[0]["name"], domain=".amazon.com"))
++        self.assertEqual(0o600, self.jar.stat().st_mode & 0o777)
++
++    @responses.activate
++    def test_verification_failure_preserves_the_old_session(self):
++        responses.get(self.config.constants.ORDER_HISTORY_URL, status=503)
++        before = self.jar.read_bytes()
++        with self.assertRaises(AmazonOrdersError):
++            self.session.import_cookies(self.cookies)
++        self.assertEqual(before, self.jar.read_bytes())
++        self.assertEqual("synthetic-old", self.session.session.cookies.get(self.cookies[0]["name"]))
++
++    @responses.activate
++    def test_concurrent_publication_is_not_overwritten(self):
++        newer = json.dumps([{**c, "value": "synthetic-newer"} for c in self.cookies])
++
++        def replace(request):
++            replacement = self.jar.with_suffix(".new")
++            replacement.write_text(newer)
++            replacement.replace(self.jar)
++            return 200, {}, "<html>Orders</html>"
++
++        responses.add_callback(responses.GET, self.config.constants.ORDER_HISTORY_URL, callback=replace)
++        with self.assertRaisesRegex(AmazonOrdersAuthError, "changed during verification"):
++            self.session.import_cookies(self.cookies)
++        self.assertEqual(newer, self.jar.read_text())
++
++    @responses.activate
++    def test_foreign_cookies_are_refused_without_a_request(self):
++        with self.assertRaisesRegex(AmazonOrdersAuthError, "another site"):
++            self.session.import_cookies([{**self.cookies[0], "domain": ".amazon.de"}])
++        self.assertEqual([], list(responses.calls))
++
++    @responses.activate
++    def test_failed_save_keeps_the_original_memory_and_disk(self):
++        responses.get(self.config.constants.ORDER_HISTORY_URL, body="<html>Orders</html>")
++        before = self.jar.read_bytes()
++        with patch("amazonorders.session.os.replace", side_effect=OSError("synthetic disk failure")):
++            with self.assertRaises(OSError):
++                self.session.import_cookies(self.cookies)
++        self.assertEqual(before, self.jar.read_bytes())
++        self.assertEqual("synthetic-old", self.session.session.cookies.get(self.cookies[0]["name"]))
++
++    @responses.activate
++    def test_an_environment_jar_cannot_bypass_isolation(self):
++        with patch.dict(os.environ, {"AMAZON_COOKIE_JAR_PATH": str(self.jar)}):
++            configured = AmazonOrdersConfig()
++            session = AmazonSession(config=configured)
++            self.addCleanup(session.session.close)
++            before = self.jar.read_bytes()
++            with self.assertRaisesRegex(AmazonOrdersError, "override"):
++                session.import_cookies(self.cookies)
++            self.assertEqual(before, self.jar.read_bytes())
+diff --git a/tests/unit/test_localization.py b/tests/unit/test_localization.py
+index 727d000..c485b34 100644
+--- a/tests/unit/test_localization.py
++++ b/tests/unit/test_localization.py
+@@ -23,6 +23,7 @@ _PARSING_MODULES = (sorted(glob.glob(os.path.join(_PACKAGE_DIR, "entity", "*.py"
+ _MESSAGE_CALLS = {"debug", "info", "warning", "warn", "error", "exception", "critical", "echo", "prompt", "input"}
+ _DISPLAY_METHODS = {"__repr__", "__str__"}
+ _PLUMBING_LITERALS = {
++    "amazon-session-", "cookies.json",  # isolated browser-session verification paths
+     "", "\n", "\x00", " ", " ****", " - ", " - (redirected) ", "&", "']", ".", "/",
+     "a", "balance",
+     "/(?:dp|gp/product|product)/([A-Z0-9]{10})(?:[/?]|$)", ": ", "://", "=", "?", "?transactionTag=",
